@@ -581,6 +581,8 @@ $ruleCatalog = @(
     @{ Id = 'P-ACL-TIER0';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Prawa nie-adminów do kont, grup i DC (Tier 0)' }
     @{ Id = 'DC-RBCD';           O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontrolerze domeny' }
     @{ Id = 'D-KCD-DC';          O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'Delegacja ograniczona do usług DC' }
+    @{ Id = 'P-GMSA-READ';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Odczyt haseł gMSA: szerokie grupy, gMSA uprzywilejowane' }
+    @{ Id = 'C-RBCD';            O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontach poza DC' }
     @{ Id = 'U-SPN-WEAK';        O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta z SPN: hasło starsze niż 3 lata, bez AES' }
     @{ Id = 'D-FGPP-WEAK';       O = 'A'; M = 'Łamanie haseł';                C = 'FGPP';         T = 'PSO słabsze od polityki haseł domeny' }
     @{ Id = 'D-SPN-DUP';         O = 'S'; M = 'Konfiguracja kont';            C = 'DUPLICATES';   T = 'Zduplikowane SPN' }
@@ -758,6 +760,8 @@ $planMeta = @{
     'DC-RBCD'          = @(0.5, 2, 1, 'Usunąć od razu; sprawdzić, kto ustawił (możliwy incydent)')
     'D-KCD-DC'         = @(1, 4, 1, 'Ustalić, czemu służy delegacja; testy aplikacji przed zmianą')
     'DC-MSBASE'        = @(4, 12, 2, 'Import baseline z Security Compliance Toolkit do GPO testowego, porównanie w Policy Analyzer')
+    'P-GMSA-READ'      = @(1, 4, 1, 'Zawęzić PrincipalsAllowedToRetrieveManagedPassword do serwerów usługi')
+    'C-RBCD'           = @(1, 4, 2, 'Ustalić z właścicielami serwerów, czemu służy delegacja')
     'U-SPN-WEAK'       = @(2, 8, 1, 'Zmiana hasła konta usługi w uzgodnieniu z właścicielem aplikacji; docelowo gMSA')
     'D-FGPP-WEAK'      = @(1, 3, 2, 'Uzgodnić z właścicielami kont objętych PSO')
     'D-SPN-DUP'        = @(1, 3, 1, 'Ustalić, które konto faktycznie uruchamia usługę')
@@ -2099,6 +2103,87 @@ Invoke-Check 'ACL-TIER0' {
         Fix = (Fx 'Get-ADObject -Filter ''msDS-AllowedToDelegateTo -like "*"'' -Properties msDS-AllowedToDelegateTo, userAccountControl',
                   'Set-ADAccountControl -Identity <konto> -TrustedToAuthForDelegation $false   # wyłącza przejście protokołu',
                   'Set-ADObject -Identity <DN konta> -Clear msDS-AllowedToDelegateTo')
+        Mitre = 'T1558'
+    }
+
+    # Konta niebędące osobami (gMSA, komputery) w grupach uprzywilejowanych - Get-LdapGroupUsers zwraca tylko osoby
+    $privOther = @{}   # SID -> nazwy grup
+    foreach ($g in $privGroups.GetEnumerator()) {
+        try {
+            $gdn = (Get-LdapObject -Identity $g.Value).distinguishedname
+            if (-not $gdn) { continue }
+            foreach ($o in @(Find-Ldap -Filter ('(&(|(objectClass=msDS-GroupManagedServiceAccount)(objectCategory=computer))(memberOf:1.2.840.113556.1.4.1941:=' + (ConvertTo-LdapFilterValue $gdn) + '))'))) {
+                if (-not $o.SID) { continue }
+                $privOther[$o.SID.Value] = @(@($privOther[$o.SID.Value]) + $g.Key | Where-Object { $_ })
+            }
+        } catch { $null = $_ }
+    }
+    $broad = @{ 'S-1-1-0' = 'Everyone'; 'S-1-5-7' = 'Anonymous Logon'; 'S-1-5-11' = 'Authenticated Users'; 'S-1-5-32-545' = 'Users (BUILTIN)'
+                "$dSid-513" = 'Domain Users'; "$dSid-515" = 'Domain Computers' }
+    $readSd = { param($Raw)
+        $x = New-Object System.DirectoryServices.ActiveDirectorySecurity
+        $x.SetSecurityDescriptorBinaryForm([byte[]]$Raw)
+        @($x.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { $_.IdentityReference.Value }) }
+
+    # gMSA: kto może pobrać hasło (msDS-GroupMSAMembership). Szeroka grupa = każdy jej członek zna hasło konta usługi.
+    # gMSA w grupie uprzywilejowanej: każdy serwer, który pobiera hasło, staje się Tier 0 (lokalny administrator serwera = administrator domeny).
+    $gmsa = @(Find-Ldap -Filter '(objectClass=msDS-GroupManagedServiceAccount)' -Properties 'msDS-GroupMSAMembership')
+    if (-not $gmsa.Count) { $ruleNote['P-GMSA-READ'] = 'Nie dotyczy' }
+    elseif (-not @($gmsa | Where-Object { $_.'msds-groupmsamembership' }).Count) { $ruleNote['P-GMSA-READ'] = 'Pominięty (msDS-GroupMSAMembership niewidoczny dla konta przeglądu)' }
+    $gmsaRows = @(foreach ($a in $gmsa) {
+        if (-not $a.'msds-groupmsamembership' -or -not $a.Enabled) { continue }
+        $pg = $privOther[$a.SID.Value]
+        $sids = @()
+        try { $sids = @(& $readSd $a.'msds-groupmsamembership') } catch { continue }
+        foreach ($sid in ($sids | Sort-Object -Unique)) {
+            $isBroad = $broad.ContainsKey($sid)
+            if (-not $isBroad -and (-not $pg -or $t0Trusted.ContainsKey($sid) -or $privBySid.ContainsKey($sid) -or $privOther.ContainsKey($sid))) { continue }
+            [pscustomobject]@{
+                gMSA = $a.samaccountname; GrupyUprzywilejowane = (@($pg) -join ', ')
+                Odczytuje = $(if ($isBroad) { $broad[$sid] } else { Resolve-SidName $sid })
+                Ryzyko = $(if ($isBroad) { 'hasło może pobrać szeroka grupa' } else { 'serwer/podmiot z dostępem do hasła konta uprzywilejowanego' })
+                SID = $sid; W = $(if ($isBroad -and $pg) { 'Critical' } else { 'High' })
+            }
+        }
+    })
+    Add-IfAny @{
+        Id = 'P-GMSA-READ'; Category = $catPriv; Severity = $(if (@($gmsaRows | Where-Object W -eq 'Critical').Count) { 'Critical' } else { 'High' })
+        Title = 'Hasła kont gMSA dostępne dla szerokich grup lub kont spoza Tier 0'
+        Objects = ($gmsaRows | Select-Object gMSA, GrupyUprzywilejowane, Odczytuje, Ryzyko, SID)
+        Description = 'Hasło konta gMSA może pobrać każdy podmiot wskazany w msDS-GroupMSAMembership (PrincipalsAllowedToRetrieveManagedPassword) i używać go jak hasła tego konta. Gdy jest to szeroka grupa (np. Domain Users, Domain Computers), konto usługi jest w praktyce dostępne dla każdego jej członka. Gdy gMSA należy do grupy uprzywilejowanej (kolumna GrupyUprzywilejowane), każdy serwer, który pobiera jego hasło, jest częścią Tier 0: jego lokalny administrator lub przejęta usługa daje uprawnienia tej grupy, często administratora domeny.'
+        Recommendation = 'Ograniczyć odczyt hasła do kont komputerów serwerów, na których działa usługa (najlepiej przez dedykowaną grupę). gMSA nie powinno należeć do grup uprzywilejowanych; jeśli musi, serwery z dostępem do hasła chronić jak kontrolery domeny.'
+        Fix = (Fx 'Get-ADServiceAccount -Filter * -Properties PrincipalsAllowedToRetrieveManagedPassword, MemberOf | Select-Object Name, PrincipalsAllowedToRetrieveManagedPassword, MemberOf',
+                  'Set-ADServiceAccount -Identity <gmsa> -PrincipalsAllowedToRetrieveManagedPassword <serwer>$')
+        Mitre = 'T1552'
+    }
+
+    # RBCD poza DC (DC zgłasza DC-RBCD). Ustawione na koncie uprzywilejowanym = przejęcie Tier 0; konto komputera utworzone
+    # przez zwykłego użytkownika (mS-DS-CreatorSID, MachineAccountQuota) jako podmiot to typowy ślad ataku.
+    $dcDnSet = @{}; foreach ($d in $dcDns) { $dcDnSet[$d] = $true }
+    $rbcdAll = @(foreach ($o in @(Find-Ldap -Filter '(msDS-AllowedToActOnBehalfOfOtherIdentity=*)' -Properties 'msDS-AllowedToActOnBehalfOfOtherIdentity')) {
+        if ($dcDnSet.ContainsKey("$($o.distinguishedname)".ToLower()) -or -not $o.SID) { continue }
+        $pg = $privOther[$o.SID.Value]
+        if (-not $pg -and $privBySid.ContainsKey($o.SID.Value)) { $pg = @('konto uprzywilejowane') }
+        $sids = @()
+        try { $sids = @(& $readSd $o.'msds-allowedtoactonbehalfofotheridentity') } catch { continue }
+        foreach ($sid in ($sids | Sort-Object -Unique)) {
+            $maq = ''
+            try {
+                $po = Get-LdapObject -Identity $sid -Properties 'mS-DS-CreatorSID'
+                if ($po.'ms-ds-creatorsid') { $maq = 'konto komputera utworzone przez zwykłe konto: ' + (Resolve-SidName ([System.Security.Principal.SecurityIdentifier]::new([byte[]]$po.'ms-ds-creatorsid', 0).Value)) }
+            } catch { $maq = '' }
+            [pscustomobject]@{ Cel = $o.samaccountname; GrupyUprzywilejowane = (@($pg) -join ', '); Podmiot = (Resolve-SidName $sid); Uwagi = $maq; SID = $sid }
+        }
+    })
+    Add-IfAny @{
+        Id = 'C-RBCD'; Category = $catComp
+        Severity = $(if (@($rbcdAll | Where-Object GrupyUprzywilejowane).Count) { 'Critical' } elseif (@($rbcdAll | Where-Object Uwagi).Count) { 'Medium' } else { 'Low' })
+        Title = 'Delegacja ograniczona zasobowo (RBCD) ustawiona na kontach poza DC'
+        Objects = $rbcdAll
+        Description = 'Podmiot z kolumny Podmiot może uzyskać bilet Kerberos do usług konta z kolumny Cel w imieniu dowolnego użytkownika, także administratora - czyli przejąć ten komputer. RBCD bywa ustawiane celowo (np. dla serwerów plików lub aplikacji), ale jest też typowym krokiem ataku: zwykły użytkownik tworzy konto komputera (MachineAccountQuota, kolumna Uwagi) i wpisuje je na komputerze, do którego ma prawo zapisu. Na kontach z grup uprzywilejowanych oznacza przejęcie domeny.'
+        Recommendation = 'Dla każdego wpisu ustalić, kto i po co go ustawił (repadmin /showobjmeta). Niewyjaśnione wpisy usunąć i traktować jako możliwy incydent, zwłaszcza gdy podmiot jest kontem komputera utworzonym przez zwykłego użytkownika.'
+        Fix = (Fx 'Get-ADComputer -Filter * -Properties PrincipalsAllowedToDelegateToAccount | Where-Object PrincipalsAllowedToDelegateToAccount | Select-Object Name, PrincipalsAllowedToDelegateToAccount',
+                  'Set-ADComputer -Identity <komputer> -PrincipalsAllowedToDelegateToAccount $null')
         Mitre = 'T1558'
     }
 }

@@ -131,6 +131,8 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | P-ACL-TIER0 | Critical / High | Nie-admini z prawami do kont i grup uprzywilejowanych, kont DC lub OU Domain Controllers: pełna kontrola, WriteDacl, WriteOwner, zapis atrybutów, członkostwo, reset hasła, Shadow Credentials, RBCD, zapis SPN, nietypowy właściciel (High, gdy dotyczy tylko konta synchronizacji Entra ID) | T1222.001 |
 | DC-RBCD | Critical | RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity) ustawione na koncie kontrolera domeny | T1558 |
 | D-KCD-DC | Critical / High | Delegacja ograniczona do usług DC (Critical przy przejściu protokołu na aktywnym koncie) | T1558 |
+| P-GMSA-READ | Critical / High | Hasło gMSA może pobrać szeroka grupa (Domain Users, Domain Computers…) albo gMSA jest w grupie uprzywilejowanej, a hasło pobierają serwery spoza Tier 0 (Critical przy obu warunkach naraz) | T1552 |
+| C-RBCD | Critical / Medium / Low | RBCD na kontach poza DC: Critical na kontach z grup uprzywilejowanych, Medium gdy podmiotem jest konto komputera utworzone przez zwykłe konto (MachineAccountQuota), w pozostałych przypadkach Low (do weryfikacji) | T1558 |
 | P-KRBTGT | High / Critical | Wiek hasła krbtgt (> 180 / > 365 dni) | T1558.001 |
 | P-PNE | High | Konta uprzywilejowane z hasłem bez wygasania | T1078.002 |
 | P-SPN | High | Konta uprzywilejowane z SPN | T1558.003 |
