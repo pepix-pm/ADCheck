@@ -110,7 +110,8 @@ $encOut = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8'
 $LdapServer = $Server
 $domainDn   = $rootDse.defaultNamingContext
 $ldapMulti  = @('serviceprincipalname', 'memberof', 'sidhistory', 'objectclass', 'member', 'serverreferencebl',
-                'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl', 'msds-allowedtodelegateto', 'msds-psoappliesto')
+                'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl', 'msds-allowedtodelegateto', 'msds-psoappliesto',
+                'certificatetemplates', 'pkiextendedkeyusage', 'mspki-certificate-application-policy', 'mspki-certificate-policy')
 
 function ConvertTo-LdapFilterValue([string]$Value) {
     $Value.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29')
@@ -346,6 +347,7 @@ $catDC   = 'Kontrolery domeny'
 $catHealth = 'Kondycja domeny i replikacja'
 $catCis    = 'Konfiguracja DC (CIS L1)'
 $catKrb    = 'Kerberos i szyfrowanie'
+$catPki    = 'Usługi certyfikatów (AD CS)'
 
 #region ---------- funkcje pomocnicze ----------
 function Format-Date($d) { if ($d) { ([datetime]$d).ToString('yyyy-MM-dd') } else { '—' } }
@@ -581,6 +583,14 @@ $ruleCatalog = @(
     @{ Id = 'P-ACL-TIER0';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Prawa nie-adminów do kont, grup i DC (Tier 0)' }
     @{ Id = 'DC-RBCD';           O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontrolerze domeny' }
     @{ Id = 'D-KCD-DC';          O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'Delegacja ograniczona do usług DC' }
+    @{ Id = 'D-ADCS-ESC1';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon: podmiot z żądania + uwierzytelnianie (ESC1)' }
+    @{ Id = 'D-ADCS-ESC2';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon: dowolne zastosowanie lub brak EKU (ESC2)' }
+    @{ Id = 'D-ADCS-ESC3';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon agenta rejestracji (ESC3)' }
+    @{ Id = 'D-ADCS-ESC9';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon bez rozszerzenia SID (ESC9)' }
+    @{ Id = 'D-ADCS-ESC13';      O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Zasady wystawiania powiązane z grupą (ESC13)' }
+    @{ Id = 'D-ADCS-ESC8';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'ADCS';         T = 'Web Enrollment przez HTTP z NTLM (ESC8)' }
+    @{ Id = 'D-ADCS-ESC4';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawo zmiany opublikowanych szablonów (ESC4)' }
+    @{ Id = 'D-ADCS-ESC5';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawa do obiektów PKI i serwerów CA (ESC5)' }
     @{ Id = 'P-GMSA-READ';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Odczyt haseł gMSA: szerokie grupy, gMSA uprzywilejowane' }
     @{ Id = 'C-RBCD';            O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontach poza DC' }
     @{ Id = 'U-SPN-WEAK';        O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta z SPN: hasło starsze niż 3 lata, bez AES' }
@@ -650,6 +660,7 @@ $complianceMap = @{
     'Uprawnienia w katalogu (ACL)' = @{ N = 'i';    I = '5.15, 5.18, 8.2' }
     'Ujawnione hasła'              = @{ N = 'h, i'; I = '5.17, 8.24' }
     'Relacje zaufania'             = @{ N = 'd, i'; I = '5.15, 5.19' }
+    'Usługi certyfikatów (AD CS)'  = @{ N = 'h, i'; I = '5.15, 8.2, 8.24' }
     'Porządek w konfiguracji'      = @{ N = 'g';    I = '8.9' }
     'Inne'                       = @{ N = 'a';    I = '' }
 }
@@ -760,6 +771,14 @@ $planMeta = @{
     'DC-RBCD'          = @(0.5, 2, 1, 'Usunąć od razu; sprawdzić, kto ustawił (możliwy incydent)')
     'D-KCD-DC'         = @(1, 4, 1, 'Ustalić, czemu służy delegacja; testy aplikacji przed zmianą')
     'DC-MSBASE'        = @(4, 12, 2, 'Import baseline z Security Compliance Toolkit do GPO testowego, porównanie w Policy Analyzer')
+    'D-ADCS-ESC1'      = @(2, 6, 1, 'Sprawdzić certyfikaty już wystawione z tego szablonu')
+    'D-ADCS-ESC2'      = @(2, 4, 1, '')
+    'D-ADCS-ESC3'      = @(2, 4, 1, 'Na CA ograniczyć agentów rejestracji (Enrollment Agents)')
+    'D-ADCS-ESC9'      = @(1, 3, 2, 'Najpierw sprawdzić tryb StrongCertificateBindingEnforcement na DC')
+    'D-ADCS-ESC13'     = @(1, 4, 1, '')
+    'D-ADCS-ESC8'      = @(2, 8, 2, 'Wymusić HTTPS z rozszerzoną ochroną (EPA) albo wyłączyć Web Enrollment')
+    'D-ADCS-ESC4'      = @(1, 4, 1, 'Przegląd uprawnień wszystkich szablonów')
+    'D-ADCS-ESC5'      = @(2, 6, 1, 'Serwer CA chronić jak kontroler domeny')
     'P-GMSA-READ'      = @(1, 4, 1, 'Zawęzić PrincipalsAllowedToRetrieveManagedPassword do serwerów usługi')
     'C-RBCD'           = @(1, 4, 2, 'Ustalić z właścicielami serwerów, czemu służy delegacja')
     'U-SPN-WEAK'       = @(2, 8, 1, 'Zmiana hasła konta usługi w uzgodnieniu z właścicielem aplikacji; docelowo gMSA')
@@ -865,6 +884,7 @@ $checkLabels = @{
     'SITES' = 'Lokacje i podsieci'; 'DC-MACHINEPWD' = 'Hasła kont komputerów DC'; 'DC-NET' = 'Porty i udziały DC'
     'GPO-SYNC' = 'Spójność GPO (AD / SYSVOL)'; 'DC-DNS' = 'Rekordy DNS kontrolerów'
     'FGPP' = 'Szczegółowe zasady haseł (PSO)'; 'DUPLICATES' = 'Zduplikowane SPN i UPN'; 'GPO-LINKS' = 'GPO bez łączy'; 'TRUSTS' = 'Relacje zaufania'
+    'ADCS' = 'Usługi certyfikatów (AD CS)'
 }
 function Format-Count([int]$N) {
     $w = if ($N -eq 1) { 'znalezisko' } elseif ($N % 10 -in 2, 3, 4 -and $N % 100 -notin 12, 13, 14) { 'znaleziska' } else { 'znalezisk' }
@@ -1991,6 +2011,22 @@ Invoke-Check 'ACL' {
 }
 #endregion
 
+# Konta niebędące osobami (gMSA, komputery) w grupach uprzywilejowanych - Get-LdapGroupUsers zwraca tylko osoby. SID -> nazwy grup.
+function Get-PrivNonPersonMap {
+    $h = @{}
+    foreach ($g in $privGroups.GetEnumerator()) {
+        try {
+            $gdn = (Get-LdapObject -Identity $g.Value).distinguishedname
+            if (-not $gdn) { continue }
+            foreach ($o in @(Find-Ldap -Filter ('(&(|(objectClass=msDS-GroupManagedServiceAccount)(objectCategory=computer))(memberOf:1.2.840.113556.1.4.1941:=' + (ConvertTo-LdapFilterValue $gdn) + '))'))) {
+                if (-not $o.SID) { continue }
+                $h[$o.SID.Value] = @(@($h[$o.SID.Value]) + $g.Key | Where-Object { $_ })
+            }
+        } catch { $null = $_ }
+    }
+    $h
+}
+
 #region ---------- uprawnienia (ACL): obiekty Tier 0 i delegacja do DC ----------
 # Tier 0: konta i grupy uprzywilejowane, konta komputerów DC, OU Domain Controllers. Prawo zapisu, zmiany uprawnień
 # lub własność takiego obiektu w rękach nie-admina to krótka ścieżka do przejęcia domeny.
@@ -2106,18 +2142,7 @@ Invoke-Check 'ACL-TIER0' {
         Mitre = 'T1558'
     }
 
-    # Konta niebędące osobami (gMSA, komputery) w grupach uprzywilejowanych - Get-LdapGroupUsers zwraca tylko osoby
-    $privOther = @{}   # SID -> nazwy grup
-    foreach ($g in $privGroups.GetEnumerator()) {
-        try {
-            $gdn = (Get-LdapObject -Identity $g.Value).distinguishedname
-            if (-not $gdn) { continue }
-            foreach ($o in @(Find-Ldap -Filter ('(&(|(objectClass=msDS-GroupManagedServiceAccount)(objectCategory=computer))(memberOf:1.2.840.113556.1.4.1941:=' + (ConvertTo-LdapFilterValue $gdn) + '))'))) {
-                if (-not $o.SID) { continue }
-                $privOther[$o.SID.Value] = @(@($privOther[$o.SID.Value]) + $g.Key | Where-Object { $_ })
-            }
-        } catch { $null = $_ }
-    }
+    $privOther = Get-PrivNonPersonMap
     $broad = @{ 'S-1-1-0' = 'Everyone'; 'S-1-5-7' = 'Anonymous Logon'; 'S-1-5-11' = 'Authenticated Users'; 'S-1-5-32-545' = 'Users (BUILTIN)'
                 "$dSid-513" = 'Domain Users'; "$dSid-515" = 'Domain Computers' }
     $readSd = { param($Raw)
@@ -2185,6 +2210,264 @@ Invoke-Check 'ACL-TIER0' {
         Fix = (Fx 'Get-ADComputer -Filter * -Properties PrincipalsAllowedToDelegateToAccount | Where-Object PrincipalsAllowedToDelegateToAccount | Select-Object Name, PrincipalsAllowedToDelegateToAccount',
                   'Set-ADComputer -Identity <komputer> -PrincipalsAllowedToDelegateToAccount $null')
         Mitre = 'T1558'
+    }
+}
+#endregion
+
+#region ---------- usługi certyfikatów (AD CS) ----------
+# Konfiguracja PKI z partycji konfiguracji (czytelna dla każdego konta domeny): CA, opublikowane szablony, ich uprawnienia i flagi.
+# ESC6, ESC7 i ESC11 (rejestr i uprawnienia samego CA) oraz ESC10 (rejestr DC) nie są oceniane.
+$pkiEku = @{ '1.3.6.1.5.5.7.3.2' = 'Client Authentication'; '1.3.6.1.5.2.3.4' = 'PKINIT Client'; '1.3.6.1.4.1.311.20.2.2' = 'Smart Card Logon'
+             '2.5.29.37.0' = 'Any Purpose'; '1.3.6.1.4.1.311.20.2.1' = 'Certificate Request Agent'; '1.3.6.1.5.5.7.3.1' = 'Server Authentication'
+             '1.3.6.1.5.5.7.3.4' = 'Secure Email'; '1.3.6.1.4.1.311.10.3.4' = 'EFS'; '1.3.6.1.5.5.7.3.3' = 'Code Signing' }
+
+# Prawa zapisu do obiektu PKI (pełna kontrola, uprawnienia, własność, zapis atrybutów, tworzenie obiektów) i właściciel spoza $Trusted
+function Get-PkiWriteAce($Sd, [hashtable]$Trusted, [string]$Obj) {
+    if ($Sd -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { return }
+    $R = [System.DirectoryServices.ActiveDirectoryRights]
+    foreach ($a in $Sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if ($a.AccessControlType -ne 'Allow' -or ($a.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
+        $sid = $a.IdentityReference.Value
+        if ($Trusted.ContainsKey($sid)) { continue }
+        $r = $a.ActiveDirectoryRights; $why = @()
+        if (($r -band $R::GenericAll) -eq $R::GenericAll) { $why += 'pełna kontrola (GenericAll)' }
+        else {
+            if ($r -band $R::WriteDacl)     { $why += 'zmiana uprawnień (WriteDacl)' }
+            if ($r -band $R::WriteOwner)    { $why += 'przejęcie własności (WriteOwner)' }
+            if ($r -band $R::WriteProperty) { $why += $(if ($a.ObjectType -eq [guid]::Empty) { 'zapis wszystkich atrybutów' } else { 'zapis atrybutu' }) }
+            if ($r -band $R::CreateChild)   { $why += 'tworzenie obiektów' }
+        }
+        if ($why.Count) { [pscustomobject]@{ Obiekt = $Obj; Podmiot = (Resolve-SidName $sid); Czlonkowie = (Get-PrincipalMemberList $sid); Prawa = ($why -join '; '); SID = $sid } }
+    }
+    try {
+        $own = $Sd.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+        if (-not $Trusted.ContainsKey($own)) {
+            [pscustomobject]@{ Obiekt = $Obj; Podmiot = (Resolve-SidName $own); Czlonkowie = (Get-PrincipalMemberList $own); Prawa = 'właściciel obiektu (może nadać sobie dowolne uprawnienia)'; SID = $own }
+        }
+    } catch { $null = $_ }
+}
+
+Invoke-Check 'ADCS' {
+    $pks = "CN=Public Key Services,CN=Services,$configDn"
+    $cas = @()
+    try { $cas = @(Find-Ldap -SearchBase "CN=Enrollment Services,$pks" -Scope OneLevel -Filter '(objectClass=pKIEnrollmentService)' -Properties dNSHostName, certificateTemplates, nTSecurityDescriptor -SecurityDescriptor) }
+    catch {
+        $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+        if ($e.HResult -ne -2147016656) { throw }   # brak kontenera = AD CS nigdy nie był instalowany
+    }
+    if (-not $cas.Count) {
+        foreach ($i in @($ruleCatalog | Where-Object { $_.C -eq 'ADCS' } | ForEach-Object { $_.Id })) { $ruleNote[$i] = 'Nie dotyczy' }
+        return
+    }
+
+    $rootSid = $dSid
+    try { $rootSid = (Get-LdapObject -Identity $rootDse.rootDomainNamingContext).SID.Value } catch { $rootSid = $dSid }
+    # Zaufani: SYSTEM, Administrators, Enterprise DCs, CREATOR OWNER, SELF, DA, DC, Cert Publishers, Key Admins, Account Operators (zgłaszani osobno), DA/EA lasu, serwery CA
+    $pkiTrusted = @{}
+    foreach ($x in 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-9', 'S-1-3-0', 'S-1-5-10', 'S-1-5-32-548', "$dSid-512", "$dSid-516", "$dSid-517", "$dSid-526",
+                   "$rootSid-512", "$rootSid-519", "$rootSid-527") { $pkiTrusted[$x] = $true }
+    $caHost = @{}   # nazwa CA -> obiekt komputera serwera CA
+    foreach ($ca in $cas) {
+        try {
+            $h = @(Find-Ldap -Filter "(&(objectCategory=computer)(dNSHostName=$(ConvertTo-LdapFilterValue "$($ca.dnshostname)")))" -Properties nTSecurityDescriptor -SecurityDescriptor)[0]
+            if ($h -and $h.SID) { $pkiTrusted[$h.SID.Value] = $true; $caHost["$($ca.name)"] = $h }
+        } catch { $null = $_ }
+    }
+    $privOther = Get-PrivNonPersonMap
+    $privGrp = @{}; foreach ($v in $privGroups.Values) { $privGrp[$v] = $true }
+    $isLow = { param($Sid) -not ($pkiTrusted.ContainsKey($Sid) -or $privBySid.ContainsKey($Sid) -or $privOther.ContainsKey($Sid) -or $privGrp.ContainsKey($Sid)) }
+    $broad = @{ 'S-1-1-0' = 'Everyone'; 'S-1-5-7' = 'Anonymous Logon'; 'S-1-5-11' = 'Authenticated Users'; 'S-1-5-32-545' = 'Users (BUILTIN)'
+                "$dSid-513" = 'Domain Users'; "$dSid-515" = 'Domain Computers' }
+    $sidText = { param($Sid) if ($broad.ContainsKey($Sid)) { $broad[$Sid] } else { Resolve-SidName $Sid } }
+
+    # Szablony opublikowane na CA (tylko te można faktycznie wystawić)
+    $pub = @{}
+    foreach ($ca in $cas) { foreach ($t in @($ca.certificatetemplates | Where-Object { $_ })) { $k = "$t".ToLower(); $pub[$k] = @(@($pub[$k]) + "$($ca.name)" | Where-Object { $_ }) } }
+    # Zasady wystawiania (OID) powiązane z grupą: certyfikat z taką zasadą daje przy logowaniu członkostwo grupy (ESC13)
+    $oidGroup = @{}
+    try {
+        foreach ($o in @(Find-Ldap -SearchBase "CN=OID,$pks" -Scope OneLevel -Filter '(msDS-OIDToGroupLink=*)' -Properties 'msPKI-Cert-Template-OID', 'msDS-OIDToGroupLink')) {
+            $oidGroup["$($o.'mspki-cert-template-oid')"] = "$($o.'msds-oidtogrouplink')"
+        }
+    } catch { $null = $_ }
+
+    $tpls = @(Find-Ldap -SearchBase "CN=Certificate Templates,$pks" -Scope OneLevel -Filter '(objectClass=pKICertificateTemplate)' -SecurityDescriptor `
+              -Properties displayName, 'msPKI-Certificate-Name-Flag', 'msPKI-Enrollment-Flag', 'msPKI-RA-Signature', pKIExtendedKeyUsage,
+                          'msPKI-Certificate-Application-Policy', 'msPKI-Certificate-Policy', nTSecurityDescriptor)
+    $R = [System.DirectoryServices.ActiveDirectoryRights]
+    $enrollG = @([guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55', [guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2', [guid]::Empty)   # Enroll, AutoEnroll, wszystkie prawa rozszerzone
+    $authEku = @('1.3.6.1.5.5.7.3.2', '1.3.6.1.5.2.3.4', '1.3.6.1.4.1.311.20.2.2', '2.5.29.37.0')
+    $esc = @{ 1 = @(); 2 = @(); 3 = @(); 4 = @(); 9 = @(); 13 = @() }
+    foreach ($t in $tpls) {
+        $onCa = $pub["$($t.name)".ToLower()]
+        if (-not $onCa) { continue }
+        $sd = $t.ntsecuritydescriptor
+        if ($sd -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { continue }
+        $tName = $(if ($t.displayname -and "$($t.displayname)" -ne "$($t.name)") { "$($t.displayname) ($($t.name))" } else { "$($t.name)" })
+
+        # Kto spoza administratorów może zarejestrować certyfikat
+        $enr = @($sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
+                    $_.AccessControlType -eq 'Allow' -and -not ($_.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -and
+                    ((($_.ActiveDirectoryRights -band $R::GenericAll) -eq $R::GenericAll) -or (($_.ActiveDirectoryRights -band $R::ExtendedRight) -and ($enrollG -contains $_.ObjectType))) } |
+                 ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique | Where-Object { & $isLow $_ })
+        $ekus  = @(@($t.pkiextendedkeyusage) + @($t.'mspki-certificate-application-policy') | Where-Object { $_ } | ForEach-Object { "$_" } | Sort-Object -Unique)
+        $nameF = [int64]$t.'mspki-certificate-name-flag'
+        $enrF  = [int64]$t.'mspki-enrollment-flag'
+        $open  = -not ($enrF -band 2) -and [int]$t.'mspki-ra-signature' -le 0    # bez zatwierdzania przez menedżera CA i bez podpisu agenta
+        $anyEku = (-not $ekus.Count) -or ($ekus -contains '2.5.29.37.0')
+        $auth   = $anyEku -or [bool]@($ekus | Where-Object { $authEku -contains $_ }).Count
+        if ($enr.Count -and $open) {
+            $row = { param($Extra)
+                $o = [ordered]@{
+                    Szablon = $tName; CA = ($onCa -join ', '); Rejestracja = (@($enr | ForEach-Object { & $sidText $_ }) -join ', ')
+                    EKU = $(if ($ekus.Count) { (@($ekus | ForEach-Object { if ($pkiEku.ContainsKey($_)) { $pkiEku[$_] } else { $_ } }) -join ', ') } else { 'brak (dowolne zastosowanie)' })
+                }
+                if ($Extra) { foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] } }
+                $o['Szerokie'] = [bool]@($enr | Where-Object { $broad.ContainsKey($_) }).Count
+                [pscustomobject]$o
+            }
+            if (($nameF -band 1) -and $auth) { $esc[1] += & $row $null }
+            if ($anyEku) { $esc[2] += & $row $null }
+            if ($ekus -contains '1.3.6.1.4.1.311.20.2.1') { $esc[3] += & $row $null }
+            if (($enrF -band 0x80000) -and $auth) { $esc[9] += & $row $null }
+            foreach ($pol in @($t.'mspki-certificate-policy' | Where-Object { $_ })) {
+                if ($auth -and $oidGroup.ContainsKey("$pol")) {
+                    $gDn = $oidGroup["$pol"]; $gObj = $null
+                    try { $gObj = Get-LdapObject -Identity $gDn } catch { $gObj = $null }
+                    $esc[13] += & $row ([ordered]@{ Grupa = $(if ($gObj) { $gObj.samaccountname } else { $gDn }); GrupaUprzywilejowana = [bool]($gObj -and $gObj.SID -and $privGrp.ContainsKey($gObj.SID.Value)) })
+                }
+            }
+        }
+        # ESC4: zmiana opublikowanego szablonu = możliwość zamiany go w ESC1
+        foreach ($w in @(Get-PkiWriteAce $sd $pkiTrusted "szablon: $tName")) {
+            if (& $isLow $w.SID) { $esc[4] += ($w | Add-Member -NotePropertyName Szerokie -NotePropertyValue $broad.ContainsKey($w.SID) -PassThru) }
+        }
+    }
+
+    # ESC5: kontenery i obiekty PKI oraz konta komputerów serwerów CA
+    $esc5 = [System.Collections.Generic.List[object]]::new()
+    $pkiObjs = @(
+        @{ Dn = $pks; Opis = 'kontener Public Key Services' }
+        @{ Dn = "CN=Certificate Templates,$pks"; Opis = 'kontener Certificate Templates' }
+        @{ Dn = "CN=Enrollment Services,$pks"; Opis = 'kontener Enrollment Services' }
+        @{ Dn = "CN=NTAuthCertificates,$pks"; Opis = 'NTAuthCertificates (CA zaufane do logowania)' }
+        @{ Dn = "CN=OID,$pks"; Opis = 'kontener OID (zasady wystawiania)' }
+        @{ Dn = "CN=Certification Authorities,$pks"; Opis = 'kontener Certification Authorities (główne CA)' }
+        @{ Dn = "CN=AIA,$pks"; Opis = 'kontener AIA' }
+    )
+    foreach ($o in $pkiObjs) {
+        $sd = $null
+        try { $sd = (Get-LdapObject -Identity $o.Dn -Properties nTSecurityDescriptor -SecurityDescriptor).ntsecuritydescriptor } catch { continue }
+        foreach ($w in @(Get-PkiWriteAce $sd $pkiTrusted $o.Opis)) { if (& $isLow $w.SID) { $esc5.Add($w) } }
+    }
+    foreach ($ca in $cas) {
+        foreach ($w in @(Get-PkiWriteAce $ca.ntsecuritydescriptor $pkiTrusted "obiekt CA: $($ca.name)")) { if (& $isLow $w.SID) { $esc5.Add($w) } }
+        $h = $caHost["$($ca.name)"]
+        if ($h) {
+            $hTrusted = $pkiTrusted.Clone(); $hTrusted.Remove($h.SID.Value)
+            foreach ($w in @(Get-DangerousAces $h.ntsecuritydescriptor $hTrusted "serwer CA: $($h.name)")) { if (& $isLow $w.SID) { $esc5.Add(($w | Select-Object Obiekt, Podmiot, Czlonkowie, Prawa, SID)) } }
+            try {
+                $own = $h.ntsecuritydescriptor.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+                if (& $isLow $own) { $esc5.Add([pscustomobject]@{ Obiekt = "serwer CA: $($h.name)"; Podmiot = (Resolve-SidName $own); Czlonkowie = (Get-PrincipalMemberList $own); Prawa = 'właściciel konta komputera'; SID = $own }) }
+            } catch { $null = $_ }
+        }
+    }
+
+    # ESC8: Web Enrollment (/certsrv) po HTTP z uwierzytelnianiem NTLM - przekazanie (relay) uwierzytelnienia DC daje certyfikat DC
+    $web = @(foreach ($ca in $cas) {
+        $hn = "$($ca.dnshostname)"
+        if (-not $hn) { continue }
+        $code = 0; $hdr = ''
+        try {
+            $req = [System.Net.HttpWebRequest]::Create("http://$hn/certsrv/")
+            $req.Timeout = 5000; $req.AllowAutoRedirect = $false; $req.Proxy = $null; $req.UseDefaultCredentials = $false
+            $resp = $req.GetResponse(); $code = [int]$resp.StatusCode; $hdr = "$($resp.Headers['WWW-Authenticate'])"; $resp.Close()
+        } catch {
+            $resp = $_.Exception.InnerException.Response
+            if (-not $resp) { $resp = $_.Exception.Response }
+            if ($resp) { $code = [int]$resp.StatusCode; $hdr = (@($resp.Headers.GetValues('WWW-Authenticate')) -join ', '); $resp.Close() }
+        }
+        if ($code -eq 401 -and $hdr -match 'NTLM|Negotiate') { [pscustomobject]@{ CA = $ca.name; Adres = "http://$hn/certsrv/"; Uwierzytelnianie = $hdr } }
+    })
+
+    $sevOf = { param($Rows, [string]$Hi, [string]$Lo) if (@($Rows | Where-Object Szerokie).Count) { $Hi } else { $Lo } }
+    $show  = { param($Rows) $Rows | Select-Object * -ExcludeProperty Szerokie }
+    $verify = 'certutil -v -dstemplate <szablon>   # flagi i EKU szablonu'
+    $unpub  = 'certutil -config "<serwer CA>\<nazwa CA>" -SetCATemplates -<szablon>   # zdjęcie szablonu z CA, jeśli zbędny'
+    $issued = 'certutil -config "<serwer CA>\<nazwa CA>" -view -restrict "CertificateTemplate=<szablon>" -out "RequestID,RequesterName,CommonName,NotAfter"   # wystawione certyfikaty'
+
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC1'; Category = $catPki; Severity = (& $sevOf $esc[1] 'Critical' 'High')
+        Title = 'Szablony certyfikatów z nazwą podmiotu z żądania i uwierzytelnianiem klienta (ESC1)'
+        Objects = (& $show $esc[1])
+        Description = 'Podmioty z kolumny Rejestracja mogą bez zatwierdzenia pobrać certyfikat, w którym sami wpisują nazwę podmiotu (opcja "Dostarczane w żądaniu"), a certyfikat nadaje się do logowania w domenie. Wystarczy wpisać nazwę administratora domeny, żeby zalogować się jako on (PKINIT) i pobrać jego skrót NTLM. Certyfikat pozostaje ważny po zmianie hasła konta. Critical, gdy rejestrację ma szeroka grupa (np. Domain Users, Domain Computers).'
+        Recommendation = 'W szablonie ustawić nazwę podmiotu "Utwórz na podstawie informacji w Active Directory" albo włączyć zatwierdzanie przez menedżera CA; ograniczyć prawo Enroll do grup, które faktycznie go potrzebują. Sprawdzić certyfikaty już wystawione z szablonu i unieważnić podejrzane.'
+        Fix = (Fx $verify, '# certtmpl.msc > szablon > Nazwa podmiotu: Utwórz na podstawie informacji w Active Directory; Wymagania wystawiania: Zatwierdzenie przez menedżera certyfikatów CA', $issued, $unpub)
+        Mitre = 'T1649'
+    }
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC2'; Category = $catPki; Severity = (& $sevOf $esc[2] 'High' 'Medium')
+        Title = 'Szablony certyfikatów do dowolnego zastosowania lub bez EKU (ESC2)'
+        Objects = (& $show $esc[2])
+        Description = 'Certyfikat z EKU "Any Purpose" albo bez EKU można użyć do czegokolwiek: logowania, podpisywania kodu, a w starszych szablonach (wersja 1) także jako certyfikat agenta rejestracji do wystawiania certyfikatów w imieniu innych użytkowników. Certyfikat bez EKU działa ponadto jak certyfikat podrzędnego CA.'
+        Recommendation = 'Ustawić w szablonie tylko potrzebne zastosowania (EKU), ograniczyć prawo Enroll albo włączyć zatwierdzanie przez menedżera CA.'
+        Fix = (Fx $verify, '# certtmpl.msc > szablon > Rozszerzenia > Zasady aplikacji: tylko wymagane zastosowania', $issued, $unpub)
+        Mitre = 'T1649'
+    }
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC3'; Category = $catPki; Severity = (& $sevOf $esc[3] 'Critical' 'High')
+        Title = 'Szablony certyfikatu agenta rejestracji dostępne dla nie-administratorów (ESC3)'
+        Objects = (& $show $esc[3])
+        Description = 'Certyfikat agenta rejestracji (Certificate Request Agent) pozwala wystąpić o certyfikat w imieniu innego użytkownika, także administratora domeny, i zalogować się jako on. Domyślnie CA nie ogranicza agentów rejestracji ani szablonów, z których mogą korzystać.'
+        Recommendation = 'Ograniczyć prawo Enroll do szablonu agenta rejestracji do wyznaczonych osób, włączyć zatwierdzanie przez menedżera CA i na CA skonfigurować ograniczenia agentów (certsrv.msc > Właściwości CA > Agenci rejestracji).'
+        Fix = (Fx $verify, $issued, $unpub)
+        Mitre = 'T1649'
+    }
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC9'; Category = $catPki; Severity = (& $sevOf $esc[9] 'Medium' 'Low')
+        Title = 'Szablony certyfikatów bez rozszerzenia zabezpieczeń SID (ESC9)'
+        Objects = (& $show $esc[9])
+        Description = 'Szablon ma flagę CT_FLAG_NO_SECURITY_EXTENSION, więc certyfikat nie zawiera SID właściciela i DC wiąże go z kontem tylko po nazwie. Kto ma prawo zapisu do innego konta (np. zmiany UPN), może uzyskać certyfikat podszywający się pod administratora. Ryzyko znika, gdy wszystkie DC działają w trybie pełnego wymuszania silnego mapowania certyfikatów (StrongCertificateBindingEnforcement = 2, domyślnie od aktualizacji z 2025 r.).'
+        Recommendation = 'Usunąć flagę z szablonu, jeśli nie jest wymagana przez aplikację; potwierdzić tryb pełnego wymuszania na wszystkich DC.'
+        Fix = (Fx $verify, 'reg query HKLM\SYSTEM\CurrentControlSet\Services\Kdc /v StrongCertificateBindingEnforcement   # na każdym DC: 2 = pełne wymuszanie')
+        Mitre = 'T1649'
+    }
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC13'; Category = $catPki; Severity = $(if (@($esc[13] | Where-Object GrupaUprzywilejowana).Count) { 'Critical' } else { 'High' })
+        Title = 'Szablony z zasadą wystawiania powiązaną z grupą (ESC13)'
+        Objects = (& $show $esc[13])
+        Description = 'Zasada wystawiania (issuance policy) tego szablonu jest powiązana z grupą (msDS-OIDToGroupLink). Logowanie certyfikatem z tą zasadą dodaje do biletu Kerberos członkostwo tej grupy, choć konto do niej nie należy. Podmioty z kolumny Rejestracja uzyskują w ten sposób uprawnienia grupy z kolumny Grupa.'
+        Recommendation = 'Ograniczyć prawo Enroll do osób, które mają mieć uprawnienia grupy, albo usunąć powiązanie zasady z grupą.'
+        Fix = (Fx $verify, 'Get-ADObject -SearchBase "CN=OID,CN=Public Key Services,CN=Services,$((Get-ADRootDSE).configurationNamingContext)" -LDAPFilter "(msDS-OIDToGroupLink=*)" -Properties msDS-OIDToGroupLink')
+        Mitre = 'T1649'
+    }
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC4'; Category = $catPki; Severity = (& $sevOf $esc[4] 'Critical' 'High')
+        Title = 'Nie-administratorzy mogą zmieniać opublikowane szablony certyfikatów (ESC4)'
+        Objects = (& $show $esc[4])
+        Description = 'Kto może zmienić szablon opublikowany na CA, może nadać sobie prawo rejestracji i włączyć nazwę podmiotu z żądania (ESC1), a potem uzyskać certyfikat administratora domeny. Kolumna Czlonkowie pokazuje aktywne konta, które mają prawo przez grupę.'
+        Recommendation = 'Usunąć prawa zapisu, zmiany uprawnień i własności szablonów dla podmiotów spoza administratorów PKI; właścicielem szablonów powinni być Enterprise Admins lub Domain Admins domeny głównej.'
+        Fix = (Fx 'dsacls "CN=<szablon>,CN=Certificate Templates,CN=Public Key Services,CN=Services,<DN konfiguracji>"', '# certtmpl.msc > szablon > Zabezpieczenia: usunąć Zapis / Pełna kontrola dla nie-administratorów')
+        Mitre = 'T1649'
+    }
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC5'; Category = $catPki; Severity = $(if (@($esc5 | Where-Object { $broad.ContainsKey($_.SID) }).Count) { 'Critical' } else { 'High' })
+        Title = 'Nie-administratorzy z prawami do obiektów PKI lub serwerów CA (ESC5)'
+        Objects = $esc5
+        Description = 'Prawo zapisu do kontenerów i obiektów PKI w AD (np. NTAuthCertificates, obiekt CA, kontener szablonów) albo do konta komputera serwera CA pozwala dodać zaufane CA, opublikować własny szablon lub przejąć serwer CA i wystawiać certyfikaty dowolnym kontom. Serwer CA i jego obiekty w AD należą do Tier 0, tak jak kontrolery domeny.'
+        Recommendation = 'Usunąć zbędne prawa; właścicielem obiektów PKI i konta serwera CA powinni być administratorzy domeny lub lasu. Wpisy, których nikt nie potrafi wyjaśnić, traktować jako możliwy incydent.'
+        Fix = (Fx 'dsacls "<DN obiektu>"   # pełna lista uprawnień', 'dsacls "<DN obiektu>" /R "<DOMENA>\<podmiot>"   # po weryfikacji')
+        Mitre = 'T1649'
+    }
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC8'; Category = $catPki; Severity = 'High'
+        Title = 'Rejestracja przez WWW (certsrv) dostępna po HTTP z uwierzytelnianiem NTLM (ESC8)'
+        Objects = $web
+        Description = 'Strona rejestracji certyfikatów CA przyjmuje uwierzytelnianie NTLM po niezaszyfrowanym HTTP. Atakujący w sieci może zmusić kontroler domeny do uwierzytelnienia się do siebie (np. PetitPotam, PrinterBug), przekazać to uwierzytelnienie do CA (NTLM relay) i uzyskać certyfikat konta DC - a z nim pełny dostęp do domeny. Test sprawdza tylko HTTP; konfiguracji HTTPS (wymóg EPA) nie ocenia.'
+        Recommendation = 'Wyłączyć HTTP na witrynie certsrv i wymagać HTTPS z rozszerzoną ochroną uwierzytelniania (EPA), albo usunąć rolę Web Enrollment, jeśli nie jest używana. Dodatkowo wyłączyć NTLM na serwerze CA tam, gdzie to możliwe.'
+        Fix = (Fx '# IIS Manager > Default Web Site > CertSrv > Ustawienia SSL: Wymagaj SSL; Uwierzytelnianie > Uwierzytelnianie systemu Windows > Zaawansowane: Rozszerzona ochrona = Wymagana',
+                  'Uninstall-WindowsFeature ADCS-Web-Enrollment   # na serwerze CA, jeśli rola jest zbędna')
+        Mitre = 'T1557'
     }
 }
 #endregion

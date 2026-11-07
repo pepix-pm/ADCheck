@@ -9,6 +9,7 @@
 - **P-KeyAdmins**, **P-EnterpriseKeyAdmins** (Medium): niepuste grupy Key Admins / Enterprise Key Admins; ich członkowie są traktowani jak konta uprzywilejowane. Domyślne prawa tych grup do msDS-KeyCredentialLink (Windows Hello for Business) nie są już zgłaszane jako fałszywe alarmy w D-ACL-DOMAIN i P-ACL-TIER0.
 - Nazwy grup wbudowanych istniejących tylko na DC (np. Pre-Windows 2000 Compatible Access) są ustalane z LDAP, gdy przegląd działa ze stacji roboczej (wcześniej w raporcie zostawał sam SID).
 - C-LAPS-READABLE: przy przeglądzie kontem uprzywilejowanym status „Pominięty (konto uprzywilejowane)” zamiast „Zaliczony”; konto sprawdzane po tożsamości LDAP, a nie procesu (poprawny wynik przy `runas /netonly`).
+- **Usługi certyfikatów (AD CS)**, nowa kategoria: CA i opublikowane szablony z partycji konfiguracji. Reguły D-ADCS-ESC1, -ESC2, -ESC3, -ESC9, -ESC13 (flagi, EKU i prawo Enroll szablonów dla nie-administratorów), -ESC4 (prawa zapisu do opublikowanych szablonów), -ESC5 (prawa do obiektów PKI i konta serwera CA) i -ESC8 (sonda HTTP `/certsrv/` z NTLM). Bez AD CS reguły mają status „Nie dotyczy”. ESC6, ESC7, ESC10 i ESC11 nie są oceniane.
 - **P-GMSA-READ** (Critical/High): kto może pobrać hasło gMSA – szerokie grupy oraz serwery spoza Tier 0 przy gMSA w grupach uprzywilejowanych.
 - **C-RBCD** (Critical/Medium/Low): RBCD ustawione na kontach poza DC, z oznaczeniem kont uprzywilejowanych i podmiotów utworzonych przez MachineAccountQuota.
 - **U-SPN-WEAK** (High): konta z SPN z hasłem starszym niż 3 lata i bez AES – priorytet przy Kerberoastingu.
