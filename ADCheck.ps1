@@ -110,7 +110,7 @@ $encOut = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8'
 $LdapServer = $Server
 $domainDn   = $rootDse.defaultNamingContext
 $ldapMulti  = @('serviceprincipalname', 'memberof', 'sidhistory', 'objectclass', 'member', 'serverreferencebl',
-                'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl', 'msds-allowedtodelegateto')
+                'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl', 'msds-allowedtodelegateto', 'msds-psoappliesto')
 
 function ConvertTo-LdapFilterValue([string]$Value) {
     $Value.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29')
@@ -336,6 +336,7 @@ $now      = Get-Date
 $staleDt  = $now.AddDays(-$StaleDays)
 $findings = [System.Collections.Generic.List[object]]::new()
 $weights  = @{ Critical = 25; High = 10; Medium = 3; Low = 1; Info = 0 }
+$ruleNote = @{}   # Id reguły -> status ustawiony przez test ('Nie dotyczy', 'Pominięty (...)'), gdy reguły nie da się ocenić
 
 $catPriv = 'Konta uprzywilejowane'
 $catUser = 'Konta użytkowników'
@@ -580,6 +581,13 @@ $ruleCatalog = @(
     @{ Id = 'P-ACL-TIER0';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Prawa nie-adminów do kont, grup i DC (Tier 0)' }
     @{ Id = 'DC-RBCD';           O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontrolerze domeny' }
     @{ Id = 'D-KCD-DC';          O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'Delegacja ograniczona do usług DC' }
+    @{ Id = 'U-SPN-WEAK';        O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta z SPN: hasło starsze niż 3 lata, bez AES' }
+    @{ Id = 'D-FGPP-WEAK';       O = 'A'; M = 'Łamanie haseł';                C = 'FGPP';         T = 'PSO słabsze od polityki haseł domeny' }
+    @{ Id = 'D-SPN-DUP';         O = 'S'; M = 'Konfiguracja kont';            C = 'DUPLICATES';   T = 'Zduplikowane SPN' }
+    @{ Id = 'D-UPN-DUP';         O = 'S'; M = 'Konfiguracja kont';            C = 'DUPLICATES';   T = 'Zduplikowane UPN' }
+    @{ Id = 'D-GPO-UNLINKED';    O = 'S'; M = 'Porządek w konfiguracji';      C = 'GPO-LINKS';    T = 'GPO bez aktywnych łączy' }
+    @{ Id = 'D-TRUST-SELAUTH';   O = 'T'; M = 'Relacje zaufania';             C = 'TRUSTS';       T = 'Zaufania bez uwierzytelniania selektywnego' }
+    @{ Id = 'D-TRUST-STALE';     O = 'T'; M = 'Relacje zaufania';             C = 'TRUSTS';       T = 'Zaufania bez zmiany hasła > 90 dni' }
 )
 # ---------- mapowanie na NIS2 / UKSC i ISO/IEC 27001:2022 ----------
 # Rodzaj ryzyka (M z katalogu reguł) -> środki z art. 21 ust. 2 NIS2 (wdrożone w UKSC, Dz. U. 2026 poz. 252) i zabezpieczenia z załącznika A ISO/IEC 27001:2022.
@@ -639,6 +647,8 @@ $complianceMap = @{
     'Uprawnienia domyślne'         = @{ N = 'i';    I = '5.15, 8.9' }
     'Uprawnienia w katalogu (ACL)' = @{ N = 'i';    I = '5.15, 5.18, 8.2' }
     'Ujawnione hasła'              = @{ N = 'h, i'; I = '5.17, 8.24' }
+    'Relacje zaufania'             = @{ N = 'd, i'; I = '5.15, 5.19' }
+    'Porządek w konfiguracji'      = @{ N = 'g';    I = '8.9' }
     'Inne'                       = @{ N = 'a';    I = '' }
 }
 
@@ -748,6 +758,13 @@ $planMeta = @{
     'DC-RBCD'          = @(0.5, 2, 1, 'Usunąć od razu; sprawdzić, kto ustawił (możliwy incydent)')
     'D-KCD-DC'         = @(1, 4, 1, 'Ustalić, czemu służy delegacja; testy aplikacji przed zmianą')
     'DC-MSBASE'        = @(4, 12, 2, 'Import baseline z Security Compliance Toolkit do GPO testowego, porównanie w Policy Analyzer')
+    'U-SPN-WEAK'       = @(2, 8, 1, 'Zmiana hasła konta usługi w uzgodnieniu z właścicielem aplikacji; docelowo gMSA')
+    'D-FGPP-WEAK'      = @(1, 3, 2, 'Uzgodnić z właścicielami kont objętych PSO')
+    'D-SPN-DUP'        = @(1, 3, 1, 'Ustalić, które konto faktycznie uruchamia usługę')
+    'D-UPN-DUP'        = @(1, 2, 1, 'Sprawdzić wpływ na synchronizację z Entra ID')
+    'D-GPO-UNLINKED'   = @(1, 2, 2, 'Kopia GPO (Backup-GPO) przed usunięciem')
+    'D-TRUST-SELAUTH'  = @(4, 12, 2, 'Najpierw nadać Allowed to Authenticate na potrzebnych serwerach')
+    'D-TRUST-STALE'    = @(1, 3, 1, 'Ustalić z administratorem drugiej strony, czy relacja jest potrzebna')
 }
 # Zwykła tabela, nie [ordered]: w OrderedDictionary indeks liczbowy oznacza pozycję, nie klucz. Kolejność: 1..3.
 $planStages = @{
@@ -843,6 +860,7 @@ $checkLabels = @{
     'BACKUP' = 'Kopia zapasowa AD'; 'SYSVOL-FRS' = 'Replikacja SYSVOL'; 'FSMO' = 'Role FSMO'; 'DC-REG' = 'Rejestracja kontrolerów domeny'
     'SITES' = 'Lokacje i podsieci'; 'DC-MACHINEPWD' = 'Hasła kont komputerów DC'; 'DC-NET' = 'Porty i udziały DC'
     'GPO-SYNC' = 'Spójność GPO (AD / SYSVOL)'; 'DC-DNS' = 'Rekordy DNS kontrolerów'
+    'FGPP' = 'Szczegółowe zasady haseł (PSO)'; 'DUPLICATES' = 'Zduplikowane SPN i UPN'; 'GPO-LINKS' = 'GPO bez łączy'; 'TRUSTS' = 'Relacje zaufania'
 }
 function Format-Count([int]$N) {
     $w = if ($N -eq 1) { 'znalezisko' } elseif ($N % 10 -in 2, 3, 4 -and $N % 100 -notin 12, 13, 14) { 'znaleziska' } else { 'znalezisk' }
@@ -1490,6 +1508,23 @@ Invoke-Check 'USERS' {
         Description = 'Każdy użytkownik domeny może pobrać bilet TGS dla tych kont i łamać ich hasła offline. Konta usług mają często słabe, niezmieniane hasła. Kolumna Szyfrowanie: przy RC4 lub wartości nieustawionej bilet jest szyfrowany RC4, które łamie się wielokrotnie szybciej niż AES.'
         Recommendation = 'Zastąpić gMSA. Jeśli to niemożliwe: hasło ≥ 25 znaków, tylko AES, regularna zmiana.'
         Fix = (Fx 'Set-ADUser -Identity <konto> -KerberosEncryptionType AES128,AES256', '# docelowo: New-ADServiceAccount -Name <gmsa> -DNSHostName <gmsa>.{DOMENA} -PrincipalsAllowedToRetrieveManagedPassword <serwer>$')
+        Mitre = 'T1558.003'
+    }
+    # Priorytet Kerberoastingu: bilet szyfrowany RC4 (brak AES w msDS-SupportedEncryptionTypes) i hasło niezmieniane od lat
+    $spnOldDt = $now.AddYears(-3)
+    Add-IfAny @{
+        Id = 'U-SPN-WEAK'; Category = $catUser; Severity = 'High'
+        Title = 'Konta z SPN z hasłem starszym niż 3 lata i bez AES (Kerberoasting)'
+        Objects = ($users | Where-Object { $_.ServicePrincipalName -and (-not $_.PasswordLastSet -or $_.PasswordLastSet -lt $spnOldDt) -and -not ([int64]$_.'msDS-SupportedEncryptionTypes' -band 0x18) } |
+                   Sort-Object PasswordLastSet | ForEach-Object {
+                    ConvertTo-UserRow $_ | Add-Member -NotePropertyName SPN -NotePropertyValue ($_.ServicePrincipalName -join ', ') -PassThru |
+                    Add-Member -NotePropertyName Szyfrowanie -NotePropertyValue (Format-EncTypes $_.'msDS-SupportedEncryptionTypes') -PassThru |
+                    Add-Member -NotePropertyName Uprzywilejowane -NotePropertyValue $(if ($privSids[$_.SID.Value]) { 'tak' } else { '' }) -PassThru })
+        Description = 'Najbardziej narażona część kont z U-SPN. Każdy użytkownik domeny może pobrać dla nich bilet zaszyfrowany RC4 i łamać hasło offline, bez śladu w postaci błędnych logowań. Hasło niezmieniane od ponad 3 lat zostało zwykle ustawione według dawnych, słabszych zasad i bywa znane wielu osobom. Konto z kolumną Uprzywilejowane = tak daje po złamaniu hasła przejęcie domeny.'
+        Recommendation = 'W pierwszej kolejności zmienić hasło tych kont na losowe, co najmniej 25 znaków, i włączyć AES. Zmiana hasła po włączeniu AES jest konieczna, bo dopiero ona tworzy klucze AES. Docelowo przenieść usługi na gMSA.'
+        Fix = (Fx 'Set-ADUser -Identity <konto> -KerberosEncryptionType AES128,AES256',
+                  'Set-ADAccountPassword -Identity <konto> -Reset   # nowe hasło także w konfiguracji usługi',
+                  '# docelowo: New-ADServiceAccount -Name <gmsa> -DNSHostName <gmsa>.{DOMENA} -PrincipalsAllowedToRetrieveManagedPassword <serwer>$')
         Mitre = 'T1558.003'
     }
     Add-IfAny @{
@@ -2418,6 +2453,165 @@ Invoke-Check 'DOMAIN' {
             Fix = (Fx 'netdom trust {DOMENA} /domain:<domena_zaufana> /quarantine:yes')
             Mitre = 'T1134.005'
         }
+    }
+}
+# Szczegółowe zasady haseł (PSO). Zwykłe konto domenowe zwykle nie widzi PSO - wtedy reguła jest pomijana, a nie zaliczana.
+Invoke-Check 'FGPP' {
+    $pso = @()
+    try {
+        $pso = @(Find-Ldap -SearchBase "CN=Password Settings Container,CN=System,$domainDn" -Scope OneLevel -Filter '(objectClass=msDS-PasswordSettings)' `
+                 -Properties 'msDS-PasswordSettingsPrecedence', 'msDS-MinimumPasswordLength', 'msDS-PasswordComplexityEnabled', 'msDS-LockoutThreshold',
+                             'msDS-PasswordReversibleEncryptionEnabled', 'msDS-PSOAppliesTo')
+    } catch {
+        $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+        if ($e.HResult -ne -2147016656) { throw }   # brak kontenera (poziom domeny < 2008) = brak PSO
+    }
+    $readable = @($pso | Where-Object { $null -ne $_.'msds-minimumpasswordlength' })
+    if ($readable.Count -lt $pso.Count -or (-not $pso.Count -and -not $runAsPriv)) { $ruleNote['D-FGPP-WEAK'] = 'Pominięty (PSO niewidoczne dla konta przeglądu)'; return }
+    if (-not $pso.Count) { $ruleNote['D-FGPP-WEAK'] = 'Nie dotyczy'; return }
+
+    $privAll = @{}
+    foreach ($s in $privGroups.Values) { $privAll[$s] = $true }
+    foreach ($s in $privSids.Keys) { $privAll[$s] = $true }
+    $rows = @(foreach ($p in $readable) {
+        $len  = [int]$p.'msds-minimumpasswordlength'
+        $cplx = "$($p.'msds-passwordcomplexityenabled')" -eq 'True'
+        $lock = [int]$p.'msds-lockoutthreshold'
+        $why  = @()
+        if ($len -lt $pp.MinPasswordLength) { $why += "długość $len < $($pp.MinPasswordLength)" }
+        if (-not $cplx -and $pp.ComplexityEnabled) { $why += 'złożoność wyłączona' }
+        if ($lock -eq 0 -and $pp.LockoutThreshold -gt 0) { $why += 'brak blokady konta' }
+        if ("$($p.'msds-passwordreversibleencryptionenabled')" -eq 'True') { $why += 'hasła przechowywane odwracalnie' }
+        if (-not $why.Count) { continue }
+        $targets = @(foreach ($dn in @($p.'msds-psoappliesto' | Where-Object { $_ })) {
+            $o = $null
+            try { $o = Get-LdapObject -Identity "$dn" } catch { $o = $null }
+            [pscustomobject]@{ N = $(if ($o -and $o.samaccountname) { $o.samaccountname } else { "$dn" }); P = [bool]($o -and $o.SID -and $privAll[$o.SID.Value]) }
+        })
+        [pscustomobject]@{
+            PSO = $p.name; Priorytet = [int]$p.'msds-passwordsettingsprecedence'; Slabsze = ($why -join '; ')
+            Uprzywilejowani = (@($targets | Where-Object P | ForEach-Object N) -join ', '); Obejmuje = (@($targets | ForEach-Object N) -join ', ')
+        }
+    })
+    Add-IfAny @{
+        Id = 'D-FGPP-WEAK'; Category = $catDom; Severity = $(if (@($rows | Where-Object Uprzywilejowani).Count) { 'High' } else { 'Medium' })
+        Title = 'Szczegółowe zasady haseł (PSO) słabsze od polityki domeny'
+        Objects = $rows
+        Description = 'PSO zastępuje politykę haseł domeny dla wskazanych kont i grup (kolumna Obejmuje). Te PSO ją osłabiają (kolumna Slabsze). Najgroźniejsze jest PSO obejmujące konta uprzywilejowane (kolumna Uprzywilejowani) lub konta usług - one powinny mieć zasady surowsze, nie łagodniejsze. Gdy konto obejmuje kilka PSO, obowiązuje to o najniższym priorytecie liczbowym.'
+        Recommendation = 'Zaostrzyć PSO co najmniej do poziomu polityki domeny; dla administratorów i kont usług minimum 14 znaków. Jeśli PSO miało tylko zwolnić konta usług z wygasania haseł - przenieść te konta na gMSA.'
+        Fix = (Fx 'Get-ADFineGrainedPasswordPolicy -Filter * | Select-Object Name, Precedence, MinPasswordLength, ComplexityEnabled, LockoutThreshold, AppliesTo',
+                  'Set-ADFineGrainedPasswordPolicy -Identity <PSO> -MinPasswordLength 14 -ComplexityEnabled $true -LockoutThreshold 10 -ReversibleEncryptionEnabled $false')
+        Mitre = 'T1110'
+    }
+}
+
+# Zduplikowane SPN i UPN w tej domenie (unikalność obowiązuje w całym lesie; obiekty innych domen nie są sprawdzane)
+Invoke-Check 'DUPLICATES' {
+    $dup = { param($Map)
+        $Map.GetEnumerator() | Where-Object { @($_.Value | Sort-Object -Unique).Count -gt 1 } | Sort-Object Key |
+            ForEach-Object { [pscustomobject]@{ Wartosc = $_.Key; Konta = (@($_.Value | Sort-Object -Unique) -join ', ') } } }
+    $spn = @{}
+    foreach ($o in @(Find-Ldap -Filter '(servicePrincipalName=*)' -Properties servicePrincipalName)) {
+        foreach ($v in @($o.serviceprincipalname | Where-Object { $_ })) {
+            $k = "$v".ToLower()
+            if (-not $spn.ContainsKey($k)) { $spn[$k] = [System.Collections.Generic.List[string]]::new() }
+            $spn[$k].Add("$($o.samaccountname)")
+        }
+    }
+    Add-IfAny @{
+        Id = 'D-SPN-DUP'; Category = $catDom; Severity = 'Low'
+        Title = 'Ta sama nazwa SPN na kilku kontach'
+        Objects = (& $dup $spn | Select-Object @{ n = 'SPN'; e = { $_.Wartosc } }, Konta)
+        Description = 'Dla zduplikowanego SPN kontroler domeny nie wie, którym kluczem zaszyfrować bilet, więc uwierzytelnianie Kerberos do tej usługi zawodzi, a klienci przechodzą na słabsze NTLM (zdarzenie KDC 11 na DC). Duplikat może też oznaczać, że ktoś dopisał SPN cudzej usługi do konta, które kontroluje.'
+        Recommendation = 'Ustalić, które konto faktycznie uruchamia usługę, i usunąć SPN z pozostałych. Sprawdzić, kto i kiedy dodał duplikat.'
+        Fix = (Fx 'setspn -X -F   # duplikaty w całym lesie', 'setspn -D <SPN> <konto>')
+        Mitre = 'T1558.003'
+    }
+    $upn = @{}
+    foreach ($o in @(Find-Ldap -Filter '(userPrincipalName=*)' -Properties userPrincipalName)) {
+        $k = "$($o.userprincipalname)".ToLower()
+        if (-not $upn.ContainsKey($k)) { $upn[$k] = [System.Collections.Generic.List[string]]::new() }
+        $upn[$k].Add("$($o.samaccountname)")
+    }
+    Add-IfAny @{
+        Id = 'D-UPN-DUP'; Category = $catDom; Severity = 'Low'
+        Title = 'Ta sama nazwa UPN na kilku kontach'
+        Objects = (& $dup $upn | Select-Object @{ n = 'UPN'; e = { $_.Wartosc } }, Konta)
+        Description = 'Logowanie nazwą UPN (np. jan.kowalski@firma.pl) jest niejednoznaczne: kończy się błędem albo trafia na inne konto niż zamierzone. Duplikaty powodują też błędy synchronizacji z Entra ID i mogą wskazywać na konta utworzone z pominięciem procedury.'
+        Recommendation = 'Ustalić właściwe konto i zmienić UPN pozostałych.'
+        Fix = (Fx 'Get-ADUser -Filter "UserPrincipalName -eq ''<UPN>''" | Select-Object SamAccountName, Enabled, DistinguishedName',
+                  'Set-ADUser -Identity <konto> -UserPrincipalName <nowy UPN>')
+    }
+}
+
+# GPO bez aktywnych łączy (domena, OU, lokacje)
+Invoke-Check 'GPO-LINKS' {
+    $links = @{}   # DN GPO -> 'on' (choć jedno łącze włączone) | 'off' (tylko wyłączone)
+    $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
+    foreach ($h in $holders) {
+        foreach ($m in [regex]::Matches("$($h.gplink)", '\[LDAP://([^;\]]+);(\d+)\]')) {
+            $k = $m.Groups[1].Value.ToLower()
+            if (-not ([int]$m.Groups[2].Value -band 1)) { $links[$k] = 'on' } elseif (-not $links.ContainsKey($k)) { $links[$k] = 'off' }
+        }
+    }
+    $rows = @(foreach ($g in @(Find-Ldap -SearchBase "CN=Policies,CN=System,$domainDn" -Scope OneLevel -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, whenChanged)) {
+        $st = $links["$($g.distinguishedname)".ToLower()]
+        if ($st -eq 'on') { continue }
+        [pscustomobject]@{ GPO = $g.displayname; Identyfikator = $g.name; Lacza = $(if ($st -eq 'off') { 'tylko wyłączone' } else { 'brak' })
+                           Zmienione = Format-Date $g.whenchanged; Utworzone = Format-Date $g.whencreated }
+    })
+    Add-IfAny @{
+        Id = 'D-GPO-UNLINKED'; Category = $catDom; Severity = 'Low'
+        Title = 'GPO bez aktywnych łączy'
+        Objects = ($rows | Sort-Object Zmienione)
+        Description = 'Te GPO nie są podlinkowane do domeny, OU ani lokacji (albo mają tylko wyłączone łącza), więc nie działają. Zostają jednak w AD i SYSVOL: zaciemniają obraz konfiguracji, mogą zostać przypadkiem podlinkowane ponownie, a ich pliki w SYSVOL (skrypty, preferencje) czyta każde konto domeny. Łącza z OU innych domen lasu nie są sprawdzane.'
+        Recommendation = 'Potwierdzić z właścicielem, zrobić kopię i usunąć. GPO celowo trzymane jako wzorzec opisać w komentarzu GPO.'
+        Fix = (Fx 'Backup-GPO -Guid <Identyfikator> -Path <katalog kopii>', 'Remove-GPO -Guid <Identyfikator>')
+    }
+}
+
+# Relacje zaufania: uwierzytelnianie selektywne i nieużywane relacje (hasło zaufania zmienia się automatycznie co 30 dni)
+Invoke-Check 'TRUSTS' {
+    $tdo = @(Find-Ldap -SearchBase "CN=System,$domainDn" -Filter '(objectClass=trustedDomain)' -Properties trustPartner, trustDirection, trustType, trustAttributes, whenChanged)
+    if (-not $tdo.Count) { $ruleNote['D-TRUST-SELAUTH'] = 'Nie dotyczy'; $ruleNote['D-TRUST-STALE'] = 'Nie dotyczy'; return }
+    $dirName = @{ 0 = 'wyłączone'; 1 = 'przychodzące'; 2 = 'wychodzące'; 3 = 'dwukierunkowe' }
+
+    # Ta domena ufa drugiej (kierunek wychodzący lub dwukierunkowy), relacja spoza lasu i nie do obszaru Kerberos (MIT), bez CROSS_ORGANIZATION (0x10)
+    $sel = @(foreach ($t in $tdo) {
+        $a = [int]$t.trustattributes; $d = [int]$t.trustdirection
+        if (($a -band 0x20) -or $d -notin 2, 3 -or [int]$t.trusttype -eq 3 -or ($a -band 0x10)) { continue }
+        [pscustomobject]@{ Domena = $t.trustpartner; Kierunek = $dirName[$d]; Typ = $(if ($a -band 0x8) { 'lasu' } else { 'zewnętrzne' }) }
+    })
+    Add-IfAny @{
+        Id = 'D-TRUST-SELAUTH'; Category = $catDom; Severity = 'Low'
+        Title = 'Relacje zaufania bez uwierzytelniania selektywnego'
+        Objects = $sel
+        Description = 'Każde konto z zaufanej domeny lub lasu może uwierzytelnić się do każdego komputera tej domeny i jest tu traktowane jak Authenticated Users. Przejęcie dowolnego konta po drugiej stronie daje więc dostęp do zasobów i uprawnień nadanych wszystkim użytkownikom tej domeny. Uwierzytelnianie selektywne ogranicza to do serwerów, na których nadano prawo Allowed to Authenticate.'
+        Recommendation = 'Dla relacji z innymi organizacjami włączyć uwierzytelnianie selektywne i nadać Allowed to Authenticate tylko na potrzebnych serwerach. Dla relacji między własnymi lasami ocenić, czy wszystkie konta drugiej strony potrzebują dostępu.'
+        Fix = (Fx 'netdom trust {DOMENA} /domain:<domena_zaufana> /SelectiveAUTH:yes',
+                  '# wcześniej: na obiektach komputerów potrzebnych serwerów nadać grupie z drugiej domeny prawo Allowed to Authenticate')
+        Mitre = 'T1199'
+    }
+
+    $old = $now.AddDays(-90)
+    $stale = @(foreach ($t in $tdo) {
+        if ([int]$t.trustdirection -eq 0) { continue }
+        $last = @('trustAuthOutgoing', 'trustAuthIncoming' | ForEach-Object { try { Get-LdapAttrChangeTime $t.distinguishedname $_ } catch { $null } } |
+                  Where-Object { $_ } | Sort-Object -Descending)[0]
+        $src = 'zmiana hasła zaufania'
+        if (-not $last) { $last = $t.whenchanged; $src = 'ostatnia zmiana obiektu zaufania' }
+        if ($last -and $last -lt $old) {
+            [pscustomobject]@{ Domena = $t.trustpartner; Kierunek = $dirName[[int]$t.trustdirection]; OstatniaZmiana = Format-Date $last; Zrodlo = $src }
+        }
+    })
+    Add-IfAny @{
+        Id = 'D-TRUST-STALE'; Category = $catDom; Severity = 'Medium'
+        Title = 'Relacje zaufania bez zmiany hasła od ponad 90 dni'
+        Objects = $stale
+        Description = 'Hasło relacji zaufania jest zmieniane automatycznie co 30 dni, o ile kontrolery obu domen się komunikują. Brak zmiany przez ponad 90 dni oznacza zwykle, że druga domena już nie istnieje, jest nieosiągalna albo relacja jest uszkodzona. Taka relacja łatwo umyka przeglądom dostępu, a pozostaje drogą uwierzytelniania, gdy druga strona działa, ale nikt jej już nie nadzoruje.'
+        Recommendation = 'Sprawdzić relację i ustalić z administratorem drugiej strony, czy jest potrzebna. Nieużywaną usunąć, uszkodzoną naprawić (zresetować hasło zaufania po obu stronach).'
+        Fix = (Fx 'netdom trust {DOMENA} /domain:<domena> /verify', 'netdom trust {DOMENA} /domain:<domena> /remove   # po potwierdzeniu, że relacja jest zbędna')
+        Mitre = 'T1199'
     }
 }
 #endregion
@@ -3545,6 +3739,7 @@ $ruleStatus = @(foreach ($r in $ruleCatalog) {
           elseif ($r.W -eq 'WinRM' -and -not $UseWinRM) { 'Wymaga -UseWinRM' }
           elseif ($runAsPriv -and $r.Id -in @('DC-NETSESSION', 'C-LAPS-READABLE')) { 'Pominięty (konto uprzywilejowane)' }
           elseif (($errChecks -contains $r.C) -or ($r.C -eq 'DC-PROBE' -and $probeErr)) { 'Błąd testu' }
+          elseif ($ruleNote.ContainsKey($r.Id)) { $ruleNote[$r.Id] }
           elseif ($r.N -and ($foundIds -contains $r.N)) { 'Nie dotyczy' }
           else { 'Zaliczony' }
     [pscustomobject]@{

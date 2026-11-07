@@ -157,6 +157,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | DC-KRB-RC4-USED | Medium | Faktycznie wydane bilety RC4 w ostatnich 7 dniach (tylko `-UseWinRM`) | T1558.003 |
 | U-GUEST | High | Włączone konto Gość | T1078.001 |
 | U-SPN | Medium | Konta użytkowników z SPN | T1558.003 |
+| U-SPN-WEAK | High | Konta z SPN z hasłem starszym niż 3 lata i bez AES – najbardziej narażone na Kerberoasting | T1558.003 |
 | U-SIDHIST | Medium | Konta z SIDHistory | T1134.005 |
 | U-PNE | Low | Zwykłe konta z hasłem bez wygasania | T1078.002 |
 | U-STALE | Low | Nieużywane aktywne konta | T1078.002 |
@@ -180,7 +181,10 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-PWDLEN | Medium | Minimalna długość hasła < 12 | T1110 |
 | D-PWDCPLX | Medium | Złożoność haseł wyłączona | T1110 |
 | D-LOCKOUT | Medium | Brak blokady konta | T1110.003 |
+| D-FGPP-WEAK | High / Medium | Szczegółowe zasady haseł (PSO) słabsze od polityki domeny; High, gdy obejmują konta uprzywilejowane. Zwykłe konto zwykle nie widzi PSO – reguła ma wtedy status „Pominięty” | T1110 |
 | D-TRUST-SIDF | Medium | Zaufania zewnętrzne bez filtrowania SID | T1134.005 |
+| D-TRUST-STALE | Medium | Relacje zaufania bez zmiany hasła od ponad 90 dni (martwe lub uszkodzone) | T1199 |
+| D-TRUST-SELAUTH | Low | Relacje zaufania z inną domeną lub lasem bez uwierzytelniania selektywnego | T1199 |
 | D-DFL | Low | Poziom funkcjonalny domeny < 2016 | – |
 | D-FFL | Low | Poziom funkcjonalny lasu < 2016 | – |
 | D-PREWIN2000 | High / Low | Everyone, Anonymous Logon (High) lub Authenticated Users (Low) w Pre-Windows 2000 Compatible Access | T1087.002 |
@@ -189,6 +193,9 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-GPO-LLMNR | Medium | Żadne podlinkowane GPO nie wyłącza LLMNR | T1557.001 |
 | D-GPO-HARDPATH | Medium / Low | GPO osłabia Hardened UNC Paths dla SYSVOL/NETLOGON lub ich brak przy starszych systemach | T1557 |
 | D-GPO-PSLOG | Low | Żadne podlinkowane GPO nie włącza Script Block Logging | T1059.001 |
+| D-GPO-UNLINKED | Low | GPO bez aktywnych łączy do domeny, OU lub lokacji | – |
+| D-SPN-DUP | Low | Ta sama nazwa SPN na kilku kontach w domenie | T1558.003 |
+| D-UPN-DUP | Low | Ta sama nazwa UPN na kilku kontach w domenie | – |
 | D-GPP-PASSWORD | Critical / High | Hasła w preferencjach GPO w SYSVOL: `cpassword` (Critical, odszyfrowywalne przez każdego) lub hasło autologowania jawnym tekstem (High); wszystkie GPO, także niepodlinkowane; raport nie zawiera haseł | T1552.006 |
 | DC-OS-EOL | High | DC z systemem bez wsparcia | T1210 |
 | DC-SPOOLER | High | Print Spooler na DC | T1187 |
