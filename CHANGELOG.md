@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.27 – w przygotowaniu
+## 0.27 – 2026-11-07
 
 - **D-ADCS-ESC6**, **-ESC7**, **-ESC11**: ustawienia i uprawnienia samego CA odczytywane przez interfejs administracyjny CA (ICertAdmin2, prawo Read domyślnie dla Authenticated Users), z limitem czasu 30 s na CA. ESC7 jest Critical przy roli ManageCA lub szerokiej grupie.
 - Nowy status reguły „Nierozstrzygnięty”: gdy serwer CA nie odpowiada (np. zapora), D-ADCS-ESC8 i reguły ESC6/7/11 nie są już zaliczane. Przyczyna dla każdego CA trafia do znaleziska INFO-ADCS-UNVERIFIED, a liczba – do zakresu oceny na początku raportu. Odrzucone połączenie na TCP 80 (brak usługi WWW) jest traktowane jako rozstrzygnięte.
