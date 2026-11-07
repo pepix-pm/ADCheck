@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.27 – w przygotowaniu
+
+- **D-ADCS-ESC6**, **-ESC7**, **-ESC11**: ustawienia i uprawnienia samego CA odczytywane przez interfejs administracyjny CA (ICertAdmin2, prawo Read domyślnie dla Authenticated Users), z limitem czasu 30 s na CA. ESC7 jest Critical przy roli ManageCA lub szerokiej grupie.
+- Nowy status reguły „Nierozstrzygnięty”: gdy serwer CA nie odpowiada (np. zapora), D-ADCS-ESC8 i reguły ESC6/7/11 nie są już zaliczane. Przyczyna dla każdego CA trafia do znaleziska INFO-ADCS-UNVERIFIED, a liczba – do zakresu oceny na początku raportu. Odrzucone połączenie na TCP 80 (brak usługi WWW) jest traktowane jako rozstrzygnięte.
+- P-ACL-TIER0: jeden wiersz na podmiot (liczba obiektów Tier 0, przykłady, suma praw) z priorytetem 1–3 (szeroka grupa / prawo przejęcia / tylko zapis SPN); pełna lista obiektów nadal w `_obiekty.csv`.
+
 ## 0.26 – 2026-11-07
 
 - **P-ACL-TIER0** (Critical/High): niebezpieczne uprawnienia i nietypowi właściciele na kontach i grupach uprzywilejowanych, kontach komputerów DC i OU Domain Controllers. Pomijane są wpisy skopiowane z AdminSDHolder (zgłasza je D-ACL-ADMINSDHOLDER) i podmioty, które już są uprzywilejowane.

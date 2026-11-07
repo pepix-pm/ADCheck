@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.26'
+$Version = '0.27'
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
@@ -588,6 +588,9 @@ $ruleCatalog = @(
     @{ Id = 'D-ADCS-ESC3';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon agenta rejestracji (ESC3)' }
     @{ Id = 'D-ADCS-ESC9';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon bez rozszerzenia SID (ESC9)' }
     @{ Id = 'D-ADCS-ESC13';      O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Zasady wystawiania powiązane z grupą (ESC13)' }
+    @{ Id = 'D-ADCS-ESC6';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'CA przyjmuje nazwę alternatywną z żądania (ESC6)' }
+    @{ Id = 'D-ADCS-ESC7';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawa ManageCA / ManageCertificates dla nie-administratorów (ESC7)' }
+    @{ Id = 'D-ADCS-ESC11';      O = 'A'; M = 'Przechwytywanie i relay';      C = 'ADCS';         T = 'CA nie wymaga szyfrowania żądań RPC (ESC11)' }
     @{ Id = 'D-ADCS-ESC8';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'ADCS';         T = 'Web Enrollment przez HTTP z NTLM (ESC8)' }
     @{ Id = 'D-ADCS-ESC4';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawo zmiany opublikowanych szablonów (ESC4)' }
     @{ Id = 'D-ADCS-ESC5';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawa do obiektów PKI i serwerów CA (ESC5)' }
@@ -776,6 +779,9 @@ $planMeta = @{
     'D-ADCS-ESC3'      = @(2, 4, 1, 'Na CA ograniczyć agentów rejestracji (Enrollment Agents)')
     'D-ADCS-ESC9'      = @(1, 3, 2, 'Najpierw sprawdzić tryb StrongCertificateBindingEnforcement na DC')
     'D-ADCS-ESC13'     = @(1, 4, 1, '')
+    'D-ADCS-ESC6'      = @(1, 2, 1, 'Restart usługi CertSvc po zmianie')
+    'D-ADCS-ESC7'      = @(1, 3, 1, 'Przegląd ról CA (certsrv.msc > Zabezpieczenia)')
+    'D-ADCS-ESC11'     = @(1, 2, 2, 'Sprawdzić, czy nie ma klientów XP/2003 wysyłających nieszyfrowane żądania')
     'D-ADCS-ESC8'      = @(2, 8, 2, 'Wymusić HTTPS z rozszerzoną ochroną (EPA) albo wyłączyć Web Enrollment')
     'D-ADCS-ESC4'      = @(1, 4, 1, 'Przegląd uprawnień wszystkich szablonów')
     'D-ADCS-ESC5'      = @(2, 6, 1, 'Serwer CA chronić jak kontroler domeny')
@@ -855,6 +861,7 @@ function Add-Finding([hashtable]$F) {
         ISO27001       = ''
         MDI            = (Get-MdiRef $F.Id)
         Objects        = $obj
+        Detail         = @($F.Detail | Where-Object { $_ })   # pełna lista do _obiekty.csv, gdy Objects są zagregowane
     }
     if ($F.Severity -ne 'Info' -and $complianceMap.ContainsKey($row.Model)) {
         $row.NIS2     = $complianceMap[$row.Model].N
@@ -2078,12 +2085,29 @@ Invoke-Check 'ACL-TIER0' {
     $t0Rows = @($t0Rows | ForEach-Object {
         $_ | Add-Member -NotePropertyName Uwagi -NotePropertyValue $(if (($_.Podmiot -split '\\')[-1] -match $syncRe) { 'prawdopodobnie konto synchronizacji Entra ID (zapis zwrotny haseł)' } else { '' }) -PassThru
     })
+    # Agregacja: jeden wiersz na podmiot (w dużych domenach ten sam podmiot ma prawa do setek obiektów); pełna lista w _obiekty.csv.
+    # Priorytet: 1 = szeroka grupa, 2 = prawo dające bezpośrednie przejęcie, 3 = tylko zapis SPN (celowany Kerberoasting)
+    $wideT0 = @('S-1-1-0', 'S-1-5-7', 'S-1-5-11', 'S-1-5-32-545', "$dSid-513", "$dSid-515")
+    $t0Agg = @($t0Rows | Group-Object SID | ForEach-Object {
+        $g = @($_.Group); $f = $g[0]
+        $rights = @($g | ForEach-Object { "$($_.Prawa)" -split '; ' } | Where-Object { $_ } | Sort-Object -Unique)
+        $objs   = @($g | ForEach-Object { $_.Obiekt } | Sort-Object -Unique)
+        $inh    = @($g | Where-Object Dziedziczone).Count
+        [pscustomobject]@{
+            Priorytet  = $(if ($wideT0 -contains $f.SID) { 1 } elseif (@($rights | Where-Object { $_ -notmatch 'SPN' }).Count) { 2 } else { 3 })
+            Podmiot    = $f.Podmiot; Czlonkowie = $f.Czlonkowie; Prawa = ($rights -join '; '); Obiekty = $objs.Count
+            Przyklady  = (@($objs | Select-Object -First 5) -join '; ') + $(if ($objs.Count -gt 5) { " (+$($objs.Count - 5))" } else { '' })
+            Dziedziczone = $(if ($inh -eq $g.Count) { 'tak' } elseif ($inh) { 'częściowo' } else { 'nie' })
+            Uwagi = $f.Uwagi; SID = $f.SID
+        }
+    } | Sort-Object Priorytet, @{ e = { $_.Obiekty }; Descending = $true })
     Add-IfAny @{
         Id = 'P-ACL-TIER0'; Category = $catPriv
-        Severity = $(if (@($t0Rows | Where-Object { -not $_.Uwagi }).Count) { 'Critical' } else { 'High' })
+        Severity = $(if (@($t0Agg | Where-Object { -not $_.Uwagi -and $_.Priorytet -le 2 }).Count) { 'Critical' } else { 'High' })
         Title = 'Podmioty spoza administratorów z prawami do kont, grup lub kontrolerów domeny (Tier 0)'
-        Objects = $t0Rows
-        Description = 'Na kontach i grupach uprzywilejowanych, kontach komputerów DC lub OU Domain Controllers są wpisy dające prawa podmiotom spoza administratorów: pełną kontrolę, zmianę uprawnień, przejęcie własności, zapis atrybutów, zmianę członkostwa grupy, reset hasła, Shadow Credentials (dodanie własnego klucza do konta i logowanie bez hasła) albo RBCD. Każde z tych praw pozwala przejąć konto administratora lub DC, a więc całą domenę. Kolumna Czlonkowie pokazuje aktywne konta, które mają prawo przez grupę. Częste źródła: dawne delegacje helpdesku, Exchange, narzędzia do zarządzania kontami, konto, które utworzyło obiekt (właściciel).'
+        Objects = $t0Agg
+        Detail = $t0Rows
+        Description = 'Na kontach i grupach uprzywilejowanych, kontach komputerów DC lub OU Domain Controllers są wpisy dające prawa podmiotom spoza administratorów: pełną kontrolę, zmianę uprawnień, przejęcie własności, zapis atrybutów, zmianę członkostwa grupy, reset hasła, Shadow Credentials (dodanie własnego klucza do konta i logowanie bez hasła) albo RBCD. Każde z tych praw pozwala przejąć konto administratora lub DC, a więc całą domenę. Kolumna Czlonkowie pokazuje aktywne konta, które mają prawo przez grupę. Częste źródła: dawne delegacje helpdesku, Exchange, narzędzia do zarządzania kontami, konto, które utworzyło obiekt (właściciel). Jeden wiersz to jeden podmiot: kolumna Obiekty podaje liczbę obiektów Tier 0, Przyklady - pierwsze z nich (pełna lista w pliku _obiekty.csv). Kolejność wg kolumny Priorytet: 1 - szeroka grupa (np. Domain Users), 2 - prawo dające bezpośrednie przejęcie, 3 - tylko zapis SPN.'
         Recommendation = 'Ustalić pochodzenie każdego wpisu i usunąć zbędne. Konta i grupy uprzywilejowane powinny mieć uprawnienia wyłącznie z AdminSDHolder; obiekty DC i OU Domain Controllers - domyślne. Właścicielem obiektów Tier 0 powinni być Domain Admins. Wpisy, których nikt nie potrafi wyjaśnić, potraktować jako możliwy ślad incydentu (repadmin /showobjmeta pokaże datę zmiany).'
         Fix = (Fx 'dsacls "<DN obiektu>"   # pełna lista uprawnień obiektu',
                   'dsacls "<DN obiektu>" /R "<DOMENA>\<podmiot>"   # usuwa wpisy podmiotu - po weryfikacji',
@@ -2216,7 +2240,7 @@ Invoke-Check 'ACL-TIER0' {
 
 #region ---------- usługi certyfikatów (AD CS) ----------
 # Konfiguracja PKI z partycji konfiguracji (czytelna dla każdego konta domeny): CA, opublikowane szablony, ich uprawnienia i flagi.
-# ESC6, ESC7 i ESC11 (rejestr i uprawnienia samego CA) oraz ESC10 (rejestr DC) nie są oceniane.
+# ESC6, ESC7, ESC11: ustawienia samego CA przez interfejs administracyjny CA (prawo Read). ESC10 (rejestr DC) nie jest oceniany.
 $pkiEku = @{ '1.3.6.1.5.5.7.3.2' = 'Client Authentication'; '1.3.6.1.5.2.3.4' = 'PKINIT Client'; '1.3.6.1.4.1.311.20.2.2' = 'Smart Card Logon'
              '2.5.29.37.0' = 'Any Purpose'; '1.3.6.1.4.1.311.20.2.1' = 'Certificate Request Agent'; '1.3.6.1.5.5.7.3.1' = 'Server Authentication'
              '1.3.6.1.5.5.7.3.4' = 'Secure Email'; '1.3.6.1.4.1.311.10.3.4' = 'EFS'; '1.3.6.1.5.5.7.3.3' = 'Code Signing' }
@@ -2373,22 +2397,103 @@ Invoke-Check 'ADCS' {
         }
     }
 
-    # ESC8: Web Enrollment (/certsrv) po HTTP z uwierzytelnianiem NTLM - przekazanie (relay) uwierzytelnienia DC daje certyfikat DC
-    $web = @(foreach ($ca in $cas) {
+    # Testy, których wyniku nie udało się ustalić dla danego CA (brak łączności, brak interfejsu) - osobne znalezisko Info i status reguły
+    $adcsUnk = [System.Collections.Generic.List[object]]::new()
+
+    # ESC8: Web Enrollment (/certsrv) po HTTP z uwierzytelnianiem NTLM - przekazanie (relay) uwierzytelnienia DC daje certyfikat DC.
+    # Rozstrzygnięte: odpowiedź HTTP albo odrzucone połączenie (RST - na TCP 80 nic nie nasłuchuje). Przekroczony czas = zapora, wynik nieznany.
+    $web = [System.Collections.Generic.List[object]]::new()
+    foreach ($ca in $cas) {
         $hn = "$($ca.dnshostname)"
-        if (-not $hn) { continue }
-        $code = 0; $hdr = ''
+        if (-not $hn) { $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = 'ESC8'; Przyczyna = 'brak nazwy DNS serwera CA w AD' }); continue }
+        $code = 0; $hdr = ''; $why = ''
         try {
             $req = [System.Net.HttpWebRequest]::Create("http://$hn/certsrv/")
             $req.Timeout = 5000; $req.AllowAutoRedirect = $false; $req.Proxy = $null; $req.UseDefaultCredentials = $false
             $resp = $req.GetResponse(); $code = [int]$resp.StatusCode; $hdr = "$($resp.Headers['WWW-Authenticate'])"; $resp.Close()
         } catch {
-            $resp = $_.Exception.InnerException.Response
-            if (-not $resp) { $resp = $_.Exception.Response }
-            if ($resp) { $code = [int]$resp.StatusCode; $hdr = (@($resp.Headers.GetValues('WWW-Authenticate')) -join ', '); $resp.Close() }
+            $we = $_.Exception; while ($we -and $we -isnot [System.Net.WebException]) { $we = $we.InnerException }
+            if ($we -and $we.Response) {
+                $resp = $we.Response; $code = [int]$resp.StatusCode; $hdr = (@($resp.Headers.GetValues('WWW-Authenticate')) -join ', '); $resp.Close()
+            } else {
+                $se = $_.Exception; while ($se -and $se -isnot [System.Net.Sockets.SocketException]) { $se = $se.InnerException }
+                if ($se -and "$($se.SocketErrorCode)" -eq 'ConnectionRefused') { $code = -1 }   # nic nie nasłuchuje na TCP 80
+                elseif ($we -and "$($we.Status)" -eq 'Timeout') { $why = 'przekroczony czas połączenia z TCP 80 - zapora blokuje ruch albo serwer nie ma roli WWW (z tego miejsca nie da się tego odróżnić)' }
+                elseif ($we -and "$($we.Status)" -eq 'NameResolutionFailure') { $why = 'nie rozwiązano nazwy DNS serwera CA' }
+                else { $why = "brak łączności HTTP: $(Get-ErrorText $_)" }
+            }
         }
-        if ($code -eq 401 -and $hdr -match 'NTLM|Negotiate') { [pscustomobject]@{ CA = $ca.name; Adres = "http://$hn/certsrv/"; Uwierzytelnianie = $hdr } }
-    })
+        if ($code -eq 401 -and $hdr -match 'NTLM|Negotiate') { $web.Add([pscustomobject]@{ CA = "$($ca.name)"; Adres = "http://$hn/certsrv/"; Uwierzytelnianie = $hdr }) }
+        elseif ($code -eq 0) { $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = "ESC8 (http://$hn/certsrv/)"; Przyczyna = $why }) }
+    }
+
+    # ESC6, ESC7, ESC11: konfiguracja i uprawnienia samego CA przez interfejs administracyjny CA (ICertAdmin2, RPC/DCOM).
+    # Wystarcza prawo Read do CA, które domyślnie mają Authenticated Users. Odczyt w osobnym wątku z limitem czasu - zablokowane porty RPC nie zawieszą przeglądu.
+    $caRead = {
+        param([string]$Cfg)
+        $o = @{ EditFlags = $null; InterfaceFlags = $null; Sd = $null; Blad = @() }
+        try {
+            $a = New-Object -ComObject CertificateAuthority.Admin
+            $pm = ''
+            try { $pm = "$($a.GetConfigEntry($Cfg, 'PolicyModules', 'Active'))" } catch { $pm = '' }
+            if (-not $pm) { $pm = 'CertificateAuthority_MicrosoftDefault.Policy' }
+            try { $o.EditFlags = [int64]$a.GetConfigEntry($Cfg, "PolicyModules\$pm", 'EditFlags') } catch { $o.Blad += "EditFlags: $($_.Exception.Message)" }
+            try { $o.InterfaceFlags = [int64]$a.GetConfigEntry($Cfg, '', 'InterfaceFlags') } catch { $o.Blad += "InterfaceFlags: $($_.Exception.Message)" }
+            try { $o.Sd = [byte[]]$a.GetConfigEntry($Cfg, '', 'Security') } catch { $o.Blad += "Security: $($_.Exception.Message)" }
+        } catch { $o.Blad += "interfejs CertificateAuthority.Admin niedostępny: $($_.Exception.Message)" }
+        $o
+    }
+    $esc6 = [System.Collections.Generic.List[object]]::new(); $esc7 = [System.Collections.Generic.List[object]]::new(); $esc11 = [System.Collections.Generic.List[object]]::new()
+    $known = @{ 6 = 0; 7 = 0; 11 = 0 }
+    foreach ($ca in $cas) {
+        $hn = "$($ca.dnshostname)"; $cfg = "$hn\$($ca.name)"
+        if (-not $hn) { continue }
+        if (-not (Test-TcpPort $hn 135 2000)) {
+            $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = 'ESC6, ESC7, ESC11 (konfiguracja CA)'; Przyczyna = 'brak łączności RPC (TCP 135) z serwerem CA' }); continue
+        }
+        $res = $null; $ar = $null
+        $ps = [powershell]::Create()
+        try {
+            [void]$ps.AddScript($caRead.ToString()).AddArgument($cfg)
+            $ar = $ps.BeginInvoke()
+            if ($ar.AsyncWaitHandle.WaitOne(30000)) { $res = @($ps.EndInvoke($ar))[0] }
+            else { [void]$ps.BeginStop($null, $null) }
+        } catch { $res = @{ Blad = @("$($_.Exception.Message)") } }
+        if ($ar -and $ar.IsCompleted) { $ps.Dispose() }
+        if (-not $res) {
+            $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = 'ESC6, ESC7, ESC11 (konfiguracja CA)'; Przyczyna = 'przekroczony czas odczytu (30 s) - zapora blokuje dynamiczne porty RPC?' }); continue
+        }
+        if ($null -ne $res.EditFlags) {
+            $known[6]++
+            if ($res.EditFlags -band 0x40000) { $esc6.Add([pscustomobject]@{ CA = "$($ca.name)"; Serwer = $hn; EditFlags = ('0x{0:X}' -f $res.EditFlags); Flaga = 'EDITF_ATTRIBUTESUBJECTALTNAME2' }) }
+        }
+        if ($null -ne $res.InterfaceFlags) {
+            $known[11]++
+            if (-not ($res.InterfaceFlags -band 0x200)) { $esc11.Add([pscustomobject]@{ CA = "$($ca.name)"; Serwer = $hn; InterfaceFlags = ('0x{0:X}' -f $res.InterfaceFlags); Brak = 'IF_ENFORCEENCRYPTICERTREQUEST' }) }
+        }
+        if ($res.Sd) {
+            try {
+                $rsd = New-Object System.Security.AccessControl.RawSecurityDescriptor -ArgumentList ([byte[]]$res.Sd), 0
+                $known[7]++
+                foreach ($ace in @($rsd.DiscretionaryAcl)) {
+                    if ($ace.AceQualifier -ne [System.Security.AccessControl.AceQualifier]::AccessAllowed) { continue }
+                    $sid = $ace.SecurityIdentifier.Value
+                    if (-not (& $isLow $sid)) { continue }
+                    $roles = @(); if ($ace.AccessMask -band 1) { $roles += 'zarządzanie CA (ManageCA)' }; if ($ace.AccessMask -band 2) { $roles += 'zarządzanie certyfikatami (ManageCertificates)' }
+                    if ($roles.Count) {
+                        $esc7.Add([pscustomobject]@{ CA = "$($ca.name)"; Podmiot = (& $sidText $sid); Czlonkowie = (Get-PrincipalMemberList $sid); Prawa = ($roles -join '; ')
+                                                     ManageCA = [bool]($ace.AccessMask -band 1); Szerokie = $broad.ContainsKey($sid); SID = $sid })
+                    }
+                }
+            } catch { $res.Blad += "Security: $($_.Exception.Message)" }
+        }
+        if (@($res.Blad).Count) {
+            $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = 'ESC6, ESC7, ESC11 (konfiguracja CA)'; Przyczyna = (@($res.Blad) -join '; ') })
+        }
+    }
+    # Reguła bez znaleziska, której nie udało się sprawdzić dla żadnego CA: status zamiast fałszywego zaliczenia
+    if (-not $web.Count -and @($adcsUnk | Where-Object Test -like 'ESC8*').Count) { $ruleNote['D-ADCS-ESC8'] = 'Nierozstrzygnięty (brak łączności HTTP z CA)' }
+    foreach ($n in 6, 7, 11) { if (-not $known[$n]) { $ruleNote["D-ADCS-ESC$n"] = 'Nierozstrzygnięty (konfiguracja CA niedostępna)' } }
 
     $sevOf = { param($Rows, [string]$Hi, [string]$Lo) if (@($Rows | Where-Object Szerokie).Count) { $Hi } else { $Lo } }
     $show  = { param($Rows) $Rows | Select-Object * -ExcludeProperty Szerokie }
@@ -2460,10 +2565,47 @@ Invoke-Check 'ADCS' {
         Mitre = 'T1649'
     }
     Add-IfAny @{
+        Id = 'D-ADCS-ESC6'; Category = $catPki; Severity = 'High'
+        Title = 'CA przyjmuje nazwę alternatywną podmiotu z żądania (ESC6)'
+        Objects = $esc6
+        Description = 'Flaga EDITF_ATTRIBUTESUBJECTALTNAME2 pozwala każdemu, kto może zarejestrować dowolny certyfikat do logowania (np. z szablonu User), dopisać w żądaniu nazwę alternatywną innego konta, także administratora domeny. Od aktualizacji z 2022 r. CA dodaje SID wnioskodawcy, a DC w trybie pełnego wymuszania silnego mapowania odrzucają taki certyfikat - ryzyko pozostaje dla DC bez pełnego wymuszania i aplikacji mapujących certyfikaty po nazwie.'
+        Recommendation = 'Wyłączyć flagę na CA i zrestartować usługę certyfikatów. Jeśli aplikacja potrzebuje nazw alternatywnych, użyć osobnego szablonu z nazwą z żądania, zatwierdzaniem przez menedżera CA i wąskim prawem Enroll.'
+        Fix = (Fx 'certutil -config "<serwer CA>\<nazwa CA>" -getreg policy\EditFlags   # sprawdzenie',
+                  'certutil -setreg policy\EditFlags -EDITF_ATTRIBUTESUBJECTALTNAME2   # na serwerze CA', 'Restart-Service CertSvc   # na serwerze CA')
+        Mitre = 'T1649'
+    }
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC7'; Category = $catPki; Severity = $(if (@($esc7 | Where-Object { $_.ManageCA -or $_.Szerokie }).Count) { 'Critical' } else { 'High' })
+        Title = 'Nie-administratorzy z rolą zarządzania CA lub certyfikatami (ESC7)'
+        Objects = ($esc7 | Select-Object CA, Podmiot, Czlonkowie, Prawa, SID)
+        Description = 'Zarządzanie CA (ManageCA) pozwala zmienić konfigurację CA, np. włączyć ESC6, opublikować dowolny szablon albo nadać sobie rolę zarządzania certyfikatami - czyli wystawić certyfikat administratora domeny. Zarządzanie certyfikatami (ManageCertificates) pozwala zatwierdzać wstrzymane żądania, co omija wymóg zatwierdzania przez menedżera CA w szablonach. Kolumna Czlonkowie pokazuje aktywne konta, które mają rolę przez grupę.'
+        Recommendation = 'Ograniczyć obie role do administratorów PKI (Tier 0). Wpisy, których nikt nie potrafi wyjaśnić, traktować jako możliwy incydent.'
+        Fix = (Fx '# certsrv.msc > Właściwości CA > Zabezpieczenia: usunąć Zarządzanie urzędem certyfikacji / Wystawianie certyfikatów i zarządzanie nimi dla nie-administratorów',
+                  'certutil -config "<serwer CA>\<nazwa CA>" -getreg ca\Security   # weryfikacja')
+        Mitre = 'T1649'
+    }
+    Add-IfAny @{
+        Id = 'D-ADCS-ESC11'; Category = $catPki; Severity = 'High'
+        Title = 'CA nie wymaga szyfrowania żądań przez RPC (ESC11)'
+        Objects = $esc11
+        Description = 'Bez flagi IF_ENFORCEENCRYPTICERTREQUEST CA przyjmuje przez RPC żądania bez szyfrowania pakietów. Atakujący w sieci może zmusić kontroler domeny do uwierzytelnienia się do siebie i przekazać to uwierzytelnienie NTLM do CA (relay), uzyskując certyfikat konta DC - skutek jak w ESC8.'
+        Recommendation = 'Włączyć wymóg szyfrowania żądań na CA i zrestartować usługę certyfikatów (flaga jest domyślna; jej brak oznacza zwykle zmianę dla bardzo starych klientów).'
+        Fix = (Fx 'certutil -setreg CA\InterfaceFlags +IF_ENFORCEENCRYPTICERTREQUEST   # na serwerze CA', 'Restart-Service CertSvc   # na serwerze CA')
+        Mitre = 'T1557'
+    }
+    Add-IfAny @{
+        Id = 'INFO-ADCS-UNVERIFIED'; Category = 'Błędy testów'; Severity = 'Info'
+        Title = 'Testy AD CS nierozstrzygnięte dla części CA'
+        Objects = $adcsUnk
+        Description = 'Dla wymienionych CA nie udało się ustalić wyniku testu (kolumna Przyczyna) - brak znaleziska nie oznacza tu, że problemu nie ma. Powtórzyć przegląd z miejsca w sieci, z którego serwer CA jest osiągalny (HTTP 80, RPC 135 i porty dynamiczne), albo sprawdzić ustawienia bezpośrednio na serwerze CA.'
+        Fix = (Fx 'certutil -config "<serwer CA>\<nazwa CA>" -getreg policy\EditFlags', 'certutil -config "<serwer CA>\<nazwa CA>" -getreg CA\InterfaceFlags',
+                  'Get-WindowsFeature ADCS-Web-Enrollment   # na serwerze CA')
+    }
+    Add-IfAny @{
         Id = 'D-ADCS-ESC8'; Category = $catPki; Severity = 'High'
         Title = 'Rejestracja przez WWW (certsrv) dostępna po HTTP z uwierzytelnianiem NTLM (ESC8)'
         Objects = $web
-        Description = 'Strona rejestracji certyfikatów CA przyjmuje uwierzytelnianie NTLM po niezaszyfrowanym HTTP. Atakujący w sieci może zmusić kontroler domeny do uwierzytelnienia się do siebie (np. PetitPotam, PrinterBug), przekazać to uwierzytelnienie do CA (NTLM relay) i uzyskać certyfikat konta DC - a z nim pełny dostęp do domeny. Test sprawdza tylko HTTP; konfiguracji HTTPS (wymóg EPA) nie ocenia.'
+        Description = 'Strona rejestracji certyfikatów CA przyjmuje uwierzytelnianie NTLM po niezaszyfrowanym HTTP. Atakujący w sieci może zmusić kontroler domeny do uwierzytelnienia się do siebie (np. PetitPotam, PrinterBug), przekazać to uwierzytelnienie do CA (NTLM relay) i uzyskać certyfikat konta DC - a z nim pełny dostęp do domeny. Test sprawdza tylko HTTP; konfiguracji HTTPS (wymóg EPA) nie ocenia. Gdy serwer CA nie odpowiada (zapora), reguła ma status „Nierozstrzygnięty”, a nie „Zaliczony”.'
         Recommendation = 'Wyłączyć HTTP na witrynie certsrv i wymagać HTTPS z rozszerzoną ochroną uwierzytelniania (EPA), albo usunąć rolę Web Enrollment, jeśli nie jest używana. Dodatkowo wyłączyć NTLM na serwerze CA tam, gdzie to możliwe.'
         Fix = (Fx '# IIS Manager > Default Web Site > CertSrv > Ustawienia SSL: Wymagaj SSL; Uwierzytelnianie > Uwierzytelnianie systemu Windows > Zaawansowane: Rozszerzona ochrona = Wymagana',
                   'Uninstall-WindowsFeature ADCS-Web-Enrollment   # na serwerze CA, jeśli rola jest zbędna')
@@ -4231,7 +4373,7 @@ $sorted | Select-Object Id, Obszar, Model, Poziom, NIS2, ISO27001, MDI, Category
     Export-Csv "$base.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';'
 
 $objRows = foreach ($f in $sorted) {
-    foreach ($o in $f.Objects) {
+    foreach ($o in $(if (@($f.Detail).Count) { $f.Detail } else { $f.Objects })) {
         $p = @($o.PSObject.Properties)
         [pscustomobject]@{
             Znalezisko = $f.Id
@@ -4403,10 +4545,12 @@ $covDone  = @($ruleStatus | Where-Object { $_.Status -in 'Znalezisko', 'Zaliczon
 $covWinRM = @($ruleStatus | Where-Object Status -eq 'Wymaga -UseWinRM').Count
 $covSkip  = @($ruleStatus | Where-Object Status -like 'Pominięty*').Count
 $covErr   = @($ruleStatus | Where-Object Status -eq 'Błąd testu').Count
+$covUnres = @($ruleStatus | Where-Object Status -like 'Nierozstrzygnięty*').Count
 $covParts = @()
 if ($covWinRM) { $covParts += "$covWinRM wymaga -UseWinRM" }
 if ($covSkip)  { $covParts += "$covSkip pominięto" }
 if ($covErr)   { $covParts += "$covErr z błędem testu" }
+if ($covUnres) { $covParts += "$covUnres nierozstrzygnięto (brak łączności)" }
 $covText = "<b>Zakres oceny:</b> ocenione reguły $covDone z $covTotal ($([Math]::Round(100 * $covDone / [Math]::Max($covTotal, 1)))%)"
 if ($covParts.Count) { $covText += "; nieocenione: $($covParts -join ', ') - wynik obszarów, których dotyczą, może być zaniżony (szczegóły: <a href=`"#reguly`">Sprawdzone reguły</a>)." } else { $covText += '.' }
 [void]$sb.Append("<p class=`"note`">$covText</p>")
@@ -4500,7 +4644,7 @@ $stCls = @{ 'Znalezisko' = 'st-bad'; 'Zaliczony' = 'st-ok'; 'Błąd testu' = 'st
 $okRules = @($ruleStatus | Where-Object Status -eq 'Zaliczony').Count
 [void]$sb.Append("<section id=`"reguly`"><h2>Sprawdzone reguły</h2><p class=`"note`">Zaliczone: $okRules z $($ruleStatus.Count). Reguły pominięte lub wymagające -UseWinRM nie zostały ocenione.</p><div class=`"tw`"><table><thead><tr><th>Status</th><th>ID</th><th>Obszar</th><th>Rodzaj ryzyka</th><th>Test</th><th>Pkt</th></tr></thead><tbody>")
 foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
-    $cls = if ($stCls.ContainsKey($r.Status)) { $stCls[$r.Status] } else { 'st-na' }
+    $cls = if ($stCls.ContainsKey($r.Status)) { $stCls[$r.Status] } elseif ($r.Status -like 'Nierozstrzygnięty*') { 'st-err' } else { 'st-na' }
     $idCell = if ($r.Status -eq 'Znalezisko') { "<a href=`"#$(HtmlEnc $r.Id)`">$(HtmlEnc $r.Id)</a>" } else { HtmlEnc $r.Id }
     [void]$sb.Append("<tr><td><span class=`"st $cls`">$(HtmlEnc $r.Status)</span></td><td>$idCell</td><td>$(HtmlEnc $r.Obszar)</td><td>$(HtmlEnc $r.Model)</td><td>$(HtmlEnc $r.Test)</td><td>$($r.Punkty)</td></tr>")
 }

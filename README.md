@@ -128,7 +128,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-ACL-DOMAIN | Critical | GenericAll / WriteDacl / WriteOwner / zapis atrybutów obiektu domeny poza administratorami | T1222.001 |
 | D-ACL-ADMINSDHOLDER | Critical | Niestandardowe prawa zapisu lub resetu hasła na AdminSDHolder | T1098 |
 | D-ACL-GPO | High | GPO podpięte do domeny lub OU Domain Controllers modyfikowalne przez nie-adminów (obiekt AD i katalog SYSVOL) | T1484.001 |
-| P-ACL-TIER0 | Critical / High | Nie-admini z prawami do kont i grup uprzywilejowanych, kont DC lub OU Domain Controllers: pełna kontrola, WriteDacl, WriteOwner, zapis atrybutów, członkostwo, reset hasła, Shadow Credentials, RBCD, zapis SPN, nietypowy właściciel (High, gdy dotyczy tylko konta synchronizacji Entra ID) | T1222.001 |
+| P-ACL-TIER0 | Critical / High | Nie-admini z prawami do kont i grup uprzywilejowanych, kont DC lub OU Domain Controllers: pełna kontrola, WriteDacl, WriteOwner, zapis atrybutów, członkostwo, reset hasła, Shadow Credentials, RBCD, zapis SPN, nietypowy właściciel (High, gdy dotyczy tylko konta synchronizacji Entra ID). Jeden wiersz na podmiot z liczbą obiektów i priorytetem; pełna lista w `_obiekty.csv` | T1222.001 |
 | DC-RBCD | Critical | RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity) ustawione na koncie kontrolera domeny | T1558 |
 | D-KCD-DC | Critical / High | Delegacja ograniczona do usług DC (Critical przy przejściu protokołu na aktywnym koncie) | T1558 |
 | P-GMSA-READ | Critical / High | Hasło gMSA może pobrać szeroka grupa (Domain Users, Domain Computers…) albo gMSA jest w grupie uprzywilejowanej, a hasło pobierają serwery spoza Tier 0 (Critical przy obu warunkach naraz) | T1552 |
@@ -138,7 +138,10 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-ADCS-ESC5 | Critical / High | Prawa zapisu nie-administratorów do kontenerów i obiektów PKI (NTAuthCertificates, obiekt CA, szablony, OID) lub do konta komputera serwera CA | T1649 |
 | D-ADCS-ESC13 | Critical / High | Szablon z zasadą wystawiania powiązaną z grupą (msDS-OIDToGroupLink) dostępny dla nie-administratorów (Critical dla grupy uprzywilejowanej) | T1649 |
 | D-ADCS-ESC2 | High / Medium | Szablon z EKU Any Purpose lub bez EKU dostępny dla nie-administratorów | T1649 |
-| D-ADCS-ESC8 | High | Rejestracja przez WWW (`http://<CA>/certsrv/`) przyjmuje NTLM po HTTP – NTLM relay do CA (sonda HTTP bez poświadczeń) | T1557 |
+| D-ADCS-ESC7 | Critical / High | Rola zarządzania CA (ManageCA, Critical) lub zarządzania certyfikatami (ManageCertificates) dla nie-administratorów – odczyt uprawnień CA przez interfejs administracyjny CA | T1649 |
+| D-ADCS-ESC6 | High | CA z flagą EDITF_ATTRIBUTESUBJECTALTNAME2 (nazwa alternatywna z żądania) | T1649 |
+| D-ADCS-ESC11 | High | CA bez wymogu szyfrowania żądań RPC (brak IF_ENFORCEENCRYPTICERTREQUEST) – NTLM relay do CA | T1557 |
+| D-ADCS-ESC8 | High | Rejestracja przez WWW (`http://<CA>/certsrv/`) przyjmuje NTLM po HTTP – NTLM relay do CA (sonda HTTP bez poświadczeń; przy braku łączności status „Nierozstrzygnięty”) | T1557 |
 | D-ADCS-ESC9 | Medium / Low | Szablon z flagą CT_FLAG_NO_SECURITY_EXTENSION i EKU do logowania | T1649 |
 | C-RBCD | Critical / Medium / Low | RBCD na kontach poza DC: Critical na kontach z grup uprzywilejowanych, Medium gdy podmiotem jest konto komputera utworzone przez zwykłe konto (MachineAccountQuota), w pozostałych przypadkach Low (do weryfikacji) | T1558 |
 | P-KRBTGT | High / Critical | Wiek hasła krbtgt (> 180 / > 365 dni) | T1558.001 |
@@ -279,7 +282,7 @@ Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezale�
 
 ## Ograniczenia
 
-Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje stacji końcowych. Z usług certyfikatów (AD CS) ocenia konfigurację zapisaną w AD (ESC1–5, 9, 13) i sondą HTTP rejestrację przez WWW (ESC8); nie ocenia ustawień samego CA (ESC6, ESC7, ESC11), rejestru DC (ESC10) ani HTTPS z EPA. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder, GPO podpiętych do domeny i OU Domain Controllers oraz na obiektach Tier 0 (konta i grupy uprzywilejowane, konta DC, OU Domain Controllers) – nie na pozostałych kontach, OU i serwerach. Ocena GPO nie uwzględnia flagi Enforced, blokowania dziedziczenia, filtrowania zabezpieczeń ani filtrów WMI. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe: przed wykonaniem sprawdź ich skutki w środowisku testowym i wprowadzaj je zgodnie z zasadami zarządzania zmianami w organizacji.
+Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje stacji końcowych. Z usług certyfikatów (AD CS) ocenia konfigurację zapisaną w AD (ESC1–5, 9, 13), ustawienia i uprawnienia CA przez jego interfejs administracyjny (ESC6, 7, 11 – wymaga łączności RPC z serwerem CA) i sondą HTTP rejestrację przez WWW (ESC8); nie ocenia rejestru DC (ESC10) ani HTTPS z EPA. Gdy serwer CA jest nieosiągalny, reguły mają status „Nierozstrzygnięty”, a przyczyna trafia do znaleziska INFO-ADCS-UNVERIFIED. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder, GPO podpiętych do domeny i OU Domain Controllers oraz na obiektach Tier 0 (konta i grupy uprzywilejowane, konta DC, OU Domain Controllers) – nie na pozostałych kontach, OU i serwerach. Ocena GPO nie uwzględnia flagi Enforced, blokowania dziedziczenia, filtrowania zabezpieczeń ani filtrów WMI. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe: przed wykonaniem sprawdź ich skutki w środowisku testowym i wprowadzaj je zgodnie z zasadami zarządzania zmianami w organizacji.
 
 ## Zgoda na badanie i ślad w środowisku
 
@@ -290,7 +293,7 @@ Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie je
 - zapytania LDAP o wszystkie konta, grupy, komputery, GPO, ACL i konfigurację lasu,
 - odczyt SYSVOL po SMB (GPO, Registry.pol, GptTmpl.inf),
 - sondy kontrolerów domeny: dostępność portów usług AD, potok `\\DC\pipe\spoolss`, wyliczanie sesji SMB (NetSessionEnum), **próbę anonimowego zapytania LDAP**,
-- zapytanie HTTP bez poświadczeń do `http://<serwer CA>/certsrv/` (jeśli w lesie jest AD CS),
+- zapytanie HTTP bez poświadczeń do `http://<serwer CA>/certsrv/` i odczyt konfiguracji CA przez RPC/DCOM (interfejs administracyjny CA, tylko odczyt) – jeśli w lesie jest AD CS,
 - odczyt dziennika zdarzeń DC (bilety Kerberos z DES/RC4), jeśli konto ma do niego dostęp,
 - w trybie `-UseWinRM`: zdalne odczyty rejestru i usług na DC.
 
