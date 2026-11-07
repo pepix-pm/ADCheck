@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.26 – w przygotowaniu
+## 0.26 – 2026-11-07
 
 - **P-ACL-TIER0** (Critical/High): niebezpieczne uprawnienia i nietypowi właściciele na kontach i grupach uprzywilejowanych, kontach komputerów DC i OU Domain Controllers. Pomijane są wpisy skopiowane z AdminSDHolder (zgłasza je D-ACL-ADMINSDHOLDER) i podmioty, które już są uprzywilejowane.
 - **DC-RBCD** (Critical): RBCD ustawione na koncie kontrolera domeny.
