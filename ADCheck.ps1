@@ -13,7 +13,7 @@
     -Silent: bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików.
     Wynik: szczegółowy raport HTML, JSON (do porównań), CSV znalezisk i CSV obiektów.
     Punkty: Critical=25, High=10, Medium=3, Low=1 za znalezisko; wynik 0-100 w czterech obszarach ryzyka,
-    wynik ogólny = najgorszy obszar, poziom dojrzałości 1-5; im mniej punktów, tym lepiej.
+    wynik ogólny = najgorszy obszar, klasa ekspozycji A-E; im mniej punktów, tym lepiej.
 
 .EXAMPLE
     .\ADCheck.ps1 -Klient KLIENT
@@ -43,6 +43,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Version = '0.28'
+$jsonSchemaVersion = '1.0'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
@@ -4327,15 +4328,23 @@ $summary = @($real | Group-Object Category | ForEach-Object {
 
 # Wynik w czterech obszarach ryzyka (0-100, suma punktów znalezisk obszaru, z limitem 100); wynik ogólny = najgorszy obszar
 $areaScore = [ordered]@{}
+$areaRaw   = [ordered]@{}   # suma punktów bez limitu - odróżnia np. 4 od 10 znalezisk Critical przy wyniku 100
 foreach ($k in $areaNames.Keys) {
     $n = $areaNames[$k]
-    $areaScore[$n] = [Math]::Min(100, [int](($real | Where-Object Obszar -eq $n | ForEach-Object { $weights[$_.Severity] } | Measure-Object -Sum).Sum))
+    $areaRaw[$n]   = [int](($real | Where-Object Obszar -eq $n | ForEach-Object { $weights[$_.Severity] } | Measure-Object -Sum).Sum)
+    $areaScore[$n] = [Math]::Min(100, $areaRaw[$n])
 }
 $score    = [int](($areaScore.Values | Measure-Object -Maximum).Maximum)
-# Poziom dojrzałości 1-5: najniższy poziom wśród znalezisk (Critical = 1 ... Low = 4); brak znalezisk = 5
+$scoreRaw = [int](($areaRaw.Values | Measure-Object -Maximum).Maximum)
+# Klasa ekspozycji A-E wg najpoważniejszego znaleziska (Critical = E ... Low = B, brak = A).
+# Opisuje stan techniczny w zakresie testów, nie dojrzałość procesów bezpieczeństwa.
+# $maturity (1-5) zostaje jako Meta.Dojrzalosc w JSON dla zgodności z wcześniejszymi raportami.
 $maturity = if ($real.Count) { [int](($real | ForEach-Object { $_.Poziom } | Measure-Object -Minimum).Minimum) } else { 5 }
-$maturityTxt = @{ 1 = 'krytyczne luki - natychmiastowe działania'; 2 = 'poważne luki - pilny plan naprawy'; 3 = 'podstawowe zabezpieczenia - wymagane usprawnienia'
-                  4 = 'dobry poziom - drobne usprawnienia'; 5 = 'brak wykrytych problemów w zakresie testów' }
+# [string]: indeks napisu daje [char], a klucze $exposureTxt są napisami
+function Get-ExposureClass([int]$Level) { if ($Level -ge 1 -and $Level -le 5) { [string]'EDCBA'[$Level - 1] } else { '?' } }
+$exposure = Get-ExposureClass $maturity
+$exposureTxt = @{ 'E' = 'krytyczna ekspozycja - natychmiastowe działania'; 'D' = 'wysoka ekspozycja - pilny plan naprawy'; 'C' = 'umiarkowana ekspozycja - wymagane usprawnienia'
+                  'B' = 'niska ekspozycja - drobne usprawnienia'; 'A' = 'brak wykrytych problemów w zakresie testów' }
 
 # Status każdej reguły z katalogu (lista sprawdzonych reguł w raporcie)
 $errChecks = @($findings | Where-Object { $_.Id -like 'ERR-*' } | ForEach-Object { $_.Id.Substring(4) })
@@ -4411,6 +4420,8 @@ if ($Previous) {
     $diff = [ordered]@{
         PoprzedniaData  = $prev.Meta.Data
         PoprzedniWynik  = $prev.Meta.Wynik
+        # raporty sprzed 0.28 nie mają sumy bez limitu - wtedy brak (porównanie tylko wyniku 0-100)
+        PoprzedniaSuma  = $(if ($prev.Meta.ObszaryBezLimitu) { [int](($prev.Meta.ObszaryBezLimitu.PSObject.Properties.Value | Measure-Object -Maximum).Maximum) } else { $null })
         Nowe            = @($currIds | Where-Object { $_ -notin $prevIds })
         Usuniete        = @($prevIds | Where-Object { $_ -notin $currIds })
     }
@@ -4422,6 +4433,8 @@ $meta = [ordered]@{
     Data      = $now.ToString('s')
     Wynik     = $score
     Obszary   = $areaScore
+    ObszaryBezLimitu = $areaRaw
+    KlasaEkspozycji  = "$exposure"
     Dojrzalosc = $maturity
     Wersja    = $Version
     DC        = @($dcs.HostName)
@@ -4462,7 +4475,8 @@ Write-Step "Zapis raportu do $OutDir..."
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DNSRoot, $now)
 
-[ordered]@{ Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted; Reguly = $ruleStatus
+# SchemaVersion: zmiana główna = niezgodna zmiana struktury (usunięcie/zmiana pola), drugorzędna = nowe pola
+[ordered]@{ SchemaVersion = $jsonSchemaVersion; Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted; Reguly = $ruleStatus
             Zgodnosc = [ordered]@{ NIS2 = $nis2Rows; ISO27001 = $isoRows }; Plan = $planRows
             Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts; Systemy = @($invOs)
                                   AktualizacjeDC = @($invPatch | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending) } } |
@@ -4619,8 +4633,9 @@ function Get-MitreLink([string]$Id) {
 }
 
 [void]$sb.Append('<div class="cards">')
-[void]$sb.Append("<div class=`"card big $(Get-ScoreClass $score)`"><div class=`"v`">$score<span class=`"of`">/100</span></div><div class=`"k`">Wynik ogólny (najgorszy obszar; im mniej, tym lepiej)</div></div>")
-[void]$sb.Append("<div class=`"card big lvl$maturity`"><div class=`"v`">$maturity<span class=`"of`">/5</span></div><div class=`"k`">Poziom dojrzałości: $(HtmlEnc $maturityTxt[$maturity])</div></div>")
+$capNote = if ($scoreRaw -gt 100) { "; osiągnięty limit - suma punktów obszaru: $scoreRaw" } else { '' }
+[void]$sb.Append("<div class=`"card big $(Get-ScoreClass $score)`"><div class=`"v`">$score<span class=`"of`">/100</span></div><div class=`"k`">Wynik ogólny (najgorszy obszar; im mniej, tym lepiej$capNote)</div></div>")
+[void]$sb.Append("<div class=`"card big lvl$maturity`"><div class=`"v`">$exposure</div><div class=`"k`">Klasa ekspozycji (A-E): $(HtmlEnc $exposureTxt[$exposure])</div></div>")
 foreach ($s in 'Critical','High','Medium','Low') {
     [void]$sb.Append("<div class=`"card`"><div class=`"v`">$($sevCount[$s])</div><div class=`"k`">$(Badge $s)</div></div>")
 }
@@ -4629,7 +4644,13 @@ if ($diff) {
     $sign  = if ($delta -gt 0) { "+$delta" } else { "$delta" }
     $pd    = "$($diff.PoprzedniaData)"
     if ($pd.Length -ge 10) { $pd = $pd.Substring(0, 10) }
-    [void]$sb.Append("<div class=`"card`"><div class=`"v`">$sign</div><div class=`"k`">Zmiana od $(HtmlEnc $pd) (było $($diff.PoprzedniWynik))</div></div>")
+    # oba wyniki na limicie 100: zmiana 0 byłaby myląca - pokazywana jest zmiana pełnej sumy punktów
+    $sumNote = ''
+    if ($null -ne $diff.PoprzedniaSuma -and ($scoreRaw -gt 100 -or $diff.PoprzedniaSuma -gt 100)) {
+        $dSum = $scoreRaw - [int]$diff.PoprzedniaSuma
+        $sumNote = "; suma punktów $(if ($dSum -gt 0) { "+$dSum" } else { "$dSum" }) (było $($diff.PoprzedniaSuma))"
+    }
+    [void]$sb.Append("<div class=`"card`"><div class=`"v`">$sign</div><div class=`"k`">Zmiana od $(HtmlEnc $pd) (było $($diff.PoprzedniWynik)$sumNote)</div></div>")
 }
 [void]$sb.Append('</div><div class="cards">')
 foreach ($a in $areaScore.Keys) {
@@ -4721,7 +4742,7 @@ foreach ($f in $sorted) {
     $sev = $f.Severity.ToLower()
     [void]$sb.Append("<section class=`"f $sev`" id=`"$(HtmlEnc $f.Id)`"><h3>$(Badge $f.Severity) $(HtmlEnc $f.Title)</h3>")
     $mitre = if ($f.Mitre) { " &nbsp;|&nbsp; MITRE ATT&amp;CK: $(Get-MitreLink $f.Mitre)" } else { '' }
-    [void]$sb.Append("<div class=`"meta`">$(HtmlEnc $f.Obszar) / $(HtmlEnc $f.Model) &nbsp;|&nbsp; $(HtmlEnc $f.Category) &nbsp;|&nbsp; ID: $(HtmlEnc $f.Id) &nbsp;|&nbsp; Punkty: $($weights[$f.Severity]) &nbsp;|&nbsp; Poziom dojrzałości: $($f.Poziom)$mitre</div>")
+    [void]$sb.Append("<div class=`"meta`">$(HtmlEnc $f.Obszar) / $(HtmlEnc $f.Model) &nbsp;|&nbsp; $(HtmlEnc $f.Category) &nbsp;|&nbsp; ID: $(HtmlEnc $f.Id) &nbsp;|&nbsp; Punkty: $($weights[$f.Severity])$mitre</div>")
     if ($f.NIS2 -or $f.ISO27001) {
         $iso = (($f.ISO27001 -split ',\s*') | Where-Object { $_ } | ForEach-Object { "A.$_" }) -join ', '
         [void]$sb.Append("<div class=`"meta`">NIS2 art. 21 ust. 2 / UKSC: lit. $(HtmlEnc $f.NIS2) &nbsp;|&nbsp; ISO/IEC 27001:2022: $(HtmlEnc $iso)</div>")
@@ -4760,7 +4781,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 
 [void]$sb.Append('<section><h2>Załącznik B. Metodyka i ograniczenia</h2><p>')
 [void]$sb.Append('Przegląd wykonano narzędziem ADCheck na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
-[void]$sb.Append('Punktacja: Critical 25, High 10, Medium 3, Low 1 pkt za znalezisko; wynik obszaru to suma punktów (maks. 100), wynik ogólny to najgorszy obszar. Poziom dojrzałości (1-5) wynika z najpoważniejszego znaleziska. ')
+[void]$sb.Append('Punktacja: Critical 25, High 10, Medium 3, Low 1 pkt za znalezisko; wynik obszaru to suma punktów (maks. 100; przy przekroczeniu raport podaje też pełną sumę), wynik ogólny to najgorszy obszar. Klasa ekspozycji (A-E) wynika z najpoważniejszego znaleziska (Critical = E, High = D, Medium = C, Low = B, brak = A) i opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa organizacji. ')
 [void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) oraz z Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller) - nie jest to pełna ocena zgodności z żadnym z nich. ')
 [void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder, GPO domeny/DC oraz konta i grupy uprzywilejowane, konta DC i OU Domain Controllers, a w usługach certyfikatów (AD CS) - szablony, obiekty PKI i ustawienia CA (bez rejestru DC i HTTPS z EPA) - ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
@@ -4777,12 +4798,12 @@ $totalH = "$(Format-Hours (($planSum.Values | ForEach-Object { $_[0] } | Measure
 if ($Silent) {
     # Tryb bez komunikatów: tylko obiekt wyniku (do skryptów i automatyzacji)
     [pscustomobject]@{
-        Klient = $Klient; Domena = $domain.DNSRoot; Wynik = $score; Dojrzalosc = $maturity
+        Klient = $Klient; Domena = $domain.DNSRoot; Wynik = $score; WynikBezLimitu = $scoreRaw; KlasaEkspozycji = "$exposure"; Dojrzalosc = $maturity
         Critical = @($real | Where-Object Severity -eq 'Critical').Count; High = @($real | Where-Object Severity -eq 'High').Count
         Raport = "$base.html"; Json = "$base.json"; Csv = "$base.csv"; CzasSek = [int]$runTimer.Elapsed.TotalSeconds
     }
 } else {
-    Write-Step "`nKlient: $Klient | Domena: $($domain.DNSRoot) | Wynik: $score/100 | Dojrzałość: $maturity/5 | Testy DC: $dcMethod" 'Cyan'
+    Write-Step "`nKlient: $Klient | Domena: $($domain.DNSRoot) | Wynik: $score/100$(if ($scoreRaw -gt 100) { " (suma $scoreRaw)" }) | Klasa ekspozycji: $exposure | Testy DC: $dcMethod" 'Cyan'
     Write-Step (($areaScore.Keys | ForEach-Object { "$($_): $($areaScore[$_])" }) -join ' | ') 'Cyan'
     $real | Format-Table Severity, Category, Title -AutoSize | Out-Host
     Write-Step "Raport: $base.html" 'Green'

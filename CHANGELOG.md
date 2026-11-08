@@ -2,6 +2,10 @@
 
 ## 0.28 – w przygotowaniu
 
+- **Klasa ekspozycji A–E** zamiast „Poziomu dojrzałości 1–5” (Critical = E, High = D, Medium = C, Low = B, brak = A). Wskaźnik opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa – stara nazwa sugerowała ocenę organizacji. Karty znalezisk nie powtarzają już poziomu (wynika z wagi). JSON: nowe pole `Meta.KlasaEkspozycji`; `Meta.Dojrzalosc` (1–5) zostaje dla zgodności.
+- Wynik przy limicie 100: karta wyniku i konsola podają pełną sumę punktów najgorszego obszaru, a porównanie z `-Previous` – zmianę sumy, gdy któryś wynik przekracza limit (wcześniej 4 i 10 znalezisk Critical dawały ten sam wynik i zmianę 0). JSON: nowe pole `Meta.ObszaryBezLimitu`; obiekt `-Silent`: `WynikBezLimitu`, `KlasaEkspozycji`.
+- JSON: pole `SchemaVersion` (`1.0`) na początku pliku – zmiana główna oznacza niezgodną zmianę struktury, drugorzędna nowe pola.
+- CI: GitHub Actions (Windows PowerShell 5.1 i PowerShell 7) – PSScriptAnalyzer (Warning, Error), testy Pester i kontrola kodowania UTF-8 z BOM plików `*.ps1`.
 - C-LAPS-EXPIRED pomija komputery nieużywane dłużej niż `-StaleDays` (są w C-STALE), tak jak C-LAPS-MISSING.
 - Nagłówek raportu: tryb testów DC opisany jako „bez -UseWinRM” zamiast „zwykłe konto” (mylące przy przeglądzie kontem uprzywilejowanym).
 - Załącznik B (metodyka): aktualny zakres – AD CS jest oceniany.

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Testy (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # powershell = Windows PowerShell 5.1 (najczęstszy u klientów), pwsh = PowerShell 7
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kodowanie UTF-8 z BOM (*.ps1)
+        run: |
+          $bad = Get-ChildItem -Recurse -Filter *.ps1 | Where-Object {
+              $b = [System.IO.File]::ReadAllBytes($_.FullName)
+              -not ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
+          }
+          if ($bad) { $bad | ForEach-Object { Write-Host "::error file=$($_.Name)::brak BOM UTF-8" }; exit 1 }
+
+      - name: Instalacja modułów
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+
+      - name: PSScriptAnalyzer
+        run: |
+          $r = Invoke-ScriptAnalyzer -Path .\ADCheck.ps1 -Severity Warning, Error
+          $r | Format-Table RuleName, Severity, Line, Message -AutoSize -Wrap | Out-String -Width 200 | Write-Host
+          if ($r) { exit 1 }
+
+      - name: Pester
+        run: |
+          Import-Module Pester -MinimumVersion 5.5.0
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = '.\tests'
+          $cfg.Run.Exit = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $cfg

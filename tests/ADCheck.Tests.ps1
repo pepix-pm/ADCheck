@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -98,6 +98,19 @@ Describe 'Get-ScoreClass' {
         Get-ScoreClass 9 | Should -Be 'r1'
         Get-ScoreClass 10 | Should -Be 'r2'
         Get-ScoreClass 30 | Should -Be 'r3'
+    }
+}
+
+Describe 'Get-ExposureClass' {
+    It 'Critical = E ... brak znalezisk = A' {
+        1..5 | ForEach-Object { Get-ExposureClass $_ } | Should -Be @('E', 'D', 'C', 'B', 'A')
+    }
+    It 'zwraca napis (klucz tabeli opisów), nie znak' {
+        Get-ExposureClass 1 | Should -BeOfType [string]
+    }
+    It 'poziom spoza zakresu' {
+        Get-ExposureClass 0 | Should -Be '?'
+        Get-ExposureClass 6 | Should -Be '?'
     }
 }
 

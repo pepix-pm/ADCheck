@@ -88,7 +88,7 @@ Uwagi:
 W katalogu `raporty` powstają pliki `AD_<klient>_<domena>_<data>`:
 
 - `.html` – raport: podsumowanie, karty znalezisk (ryzyko, zalecenie, przykładowa naprawa, obiekty), inwentaryzacja domeny, metodyka
-- `.json` – pełne dane do porównań (`-Previous`)
+- `.json` – pełne dane do porównań (`-Previous`); pole `SchemaVersion` określa wersję struktury (zmiana główna = niezgodna zmiana pól, drugorzędna = nowe pola)
 - `.csv` – lista znalezisk
 - `_obiekty.csv` – wszystkie obiekty dla wszystkich znalezisk
 - `_plan.csv` – plan naprawczy (etap, zadanie, waga, szacunek godzin, uwagi)
@@ -96,8 +96,8 @@ W katalogu `raporty` powstają pliki `AD_<klient>_<domena>_<data>`:
 ### Punktacja i struktura raportu
 
 - Każde znalezisko: Critical = 25, High = 10, Medium = 3, Low = 1 pkt.
-- Znaleziska należą do jednego z **czterech obszarów ryzyka**: obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie. Wynik obszaru = suma punktów, maks. 100. **Wynik ogólny = najgorszy obszar** (0–100, im mniej, tym lepiej).
-- **Poziom dojrzałości 1–5** wynika z najpoważniejszego znaleziska (Critical = 1, High = 2, Medium = 3, Low = 4, brak = 5).
+- Znaleziska należą do jednego z **czterech obszarów ryzyka**: obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie. Wynik obszaru = suma punktów, maks. 100. **Wynik ogólny = najgorszy obszar** (0–100, im mniej, tym lepiej). Gdy suma przekracza 100, raport podaje też pełną sumę (np. 4 i 10 znalezisk Critical dają ten sam wynik 100, ale inną sumę); porównanie z `-Previous` pokazuje wtedy zmianę sumy.
+- **Klasa ekspozycji A–E** wynika z najpoważniejszego znaleziska (Critical = E, High = D, Medium = C, Low = B, brak = A). Opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa organizacji.
 - **Macierz ryzyka** pokazuje punkty w podziale obszar × rodzaj ryzyka (np. „Łamanie haseł”, „Pass-the-hash”, „Replikacja i kondycja”).
 - **Sprawdzone reguły** – status każdego testu: znalezisko, zaliczony, nie dotyczy, pominięty, wymaga `-UseWinRM`, błąd testu.
 
@@ -279,7 +279,7 @@ Wersja i data końca wsparcia ustalane są z atrybutów `operatingSystem` i `ope
 Invoke-Pester .\tests
 ```
 
-Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezależnych od AD i ich nie uruchamiają.
+Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezależnych od AD i ich nie uruchamiają. Przy każdym pushu i pull requeście GitHub Actions (`.github/workflows/ci.yml`, Windows) uruchamia PSScriptAnalyzer (Warning, Error), testy Pester oraz sprawdza kodowanie UTF-8 z BOM plików `*.ps1`.
 
 ## Ograniczenia
 
