@@ -16,6 +16,8 @@
 - Kolumna Czlonkowie: SID domeny bez obiektu w AD opisany jako „(SID nierozwiązany - obiekt usunięty?)”; ESC5 oznacza obiekt wycofanego CA.
 - Przegląd kontem uprzywilejowanym na samym DC bez „Uruchom jako administrator”: ostrzeżenie na konsoli i w nagłówku raportu. UAC zostawia wtedy grupy administracyjne i Pre-Windows 2000 Compatible Access tylko do odmowy, więc konto widzi mniej niż zwykły użytkownik; INFO-USERS-UNREADABLE wskazuje tę przyczynę.
 - D-FGPP-WEAK: nieczytelny kontener PSO (0x8007200A) daje status „Pominięty (kontener PSO niewidoczny dla konta przeglądu)” zamiast błędu testu.
+- C-OS-W10 i C-OS-FEATURE pomijają komputery nieużywane dłużej niż `-StaleDays` (są w C-STALE), tak jak C-LAPS-EXPIRED; plan naprawczy nie proponuje już migracji systemów, których nie ma.
+- D-PREWIN2000: opis, zalecenie i polecenia naprawcze zależne od członków grupy. Przy samym Authenticated Users raport mówi wprost, że to zmiana o niskim priorytecie wymagająca testu aplikacji, i podaje polecenie wycofania.
 - D-DNS-CREATECHILD: strefa z nieczytelnymi uprawnieniami nie jest już po cichu zaliczana - trafia do ERR-DNS-ZONES, a reguła bez znaleziska ma status „Nierozstrzygnięty”.
 - Testy kont użytkowników pomijają konta z nieczytelnym userAccountControl (wpis Deny w uprawnieniach), które wcześniej trafiały do U-STALE jako aktywne bez dat. Takie konta są wymienione w nowym znalezisku Info INFO-USERS-UNREADABLE.
 

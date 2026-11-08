@@ -1728,8 +1728,8 @@ Invoke-Check 'COMPUTERS' {
     Add-IfAny @{
         Id = 'C-OS-W10'; Category = $catComp; Severity = 'Medium'
         Title = 'Komputery z Windows 10 (koniec wsparcia: 14.10.2025)'
-        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W10' } | ForEach-Object { ConvertTo-OsRow $_ })
-        Description = 'Windows 10 (poza wersjami LTSC) nie otrzymuje poprawek bez płatnej subskrypcji Extended Security Updates (ESU) - tylko dla wersji 22H2.'
+        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W10' -and $_.C.LastLogonDate -ge $staleDt } | ForEach-Object { ConvertTo-OsRow $_ })
+        Description = "Windows 10 (poza wersjami LTSC) nie otrzymuje poprawek bez płatnej subskrypcji Extended Security Updates (ESU) - tylko dla wersji 22H2. Komputery nieużywane dłużej niż $StaleDays dni są pominięte (patrz C-STALE)."
         Recommendation = 'Migracja do Windows 11 lub potwierdzona subskrypcja ESU; zweryfikować zgodność sprzętu (TPM 2.0, procesor). Komputery w wersji starszej niż 22H2 nie mogą otrzymać ESU.'
         Fix = (Fx '# brak poprawki skryptem - migracja do Windows 11 lub ESU (tylko 22H2)')
         Mitre = 'T1210'
@@ -1737,8 +1737,8 @@ Invoke-Check 'COMPUTERS' {
     Add-IfAny @{
         Id = 'C-OS-FEATURE'; Category = $catComp; Severity = 'Medium'
         Title = 'Komputery z Windows 11 w wersji bez wsparcia'
-        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W11' -and $_.L.Koniec -and $_.L.Koniec -lt $now } | ForEach-Object { ConvertTo-OsRow $_ })
-        Description = 'Każda wersja Windows 11 (np. 23H2) otrzymuje poprawki przez 24 miesiące (Home/Pro) lub 36 miesięcy (Enterprise/Education). Te komputery nie dostały aktualizacji funkcji i nie otrzymują już poprawek bezpieczeństwa.'
+        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W11' -and $_.L.Koniec -and $_.L.Koniec -lt $now -and $_.C.LastLogonDate -ge $staleDt } | ForEach-Object { ConvertTo-OsRow $_ })
+        Description = "Każda wersja Windows 11 (np. 23H2) otrzymuje poprawki przez 24 miesiące (Home/Pro) lub 36 miesięcy (Enterprise/Education). Te komputery nie dostały aktualizacji funkcji i nie otrzymują już poprawek bezpieczeństwa. Komputery nieużywane dłużej niż $StaleDays dni są pominięte (patrz C-STALE)."
         Recommendation = 'Zainstalować bieżącą aktualizację funkcji (Windows Update / WSUS / Intune). Sprawdzić, czy GPO TargetReleaseVersion lub zatwierdzenia w WSUS nie blokują aktualizacji, oraz czy komputery mają miejsce na dysku.'
         Fix = (Fx 'gpresult /h gp.html   # na komputerze: Windows Update > TargetReleaseVersion', 'reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate /v TargetReleaseVersionInfo')
         Mitre = 'T1210'
@@ -2936,11 +2936,22 @@ Invoke-Check 'DOMAIN' {
             Id = 'D-PREWIN2000'; Category = $catDom; Severity = $(if ($anon) { 'High' } else { 'Low' })
             Title = "Pre-Windows 2000 Compatible Access zawiera: $(($pwHits | ForEach-Object { $wide[$_] }) -join ', ')"
             Objects = ($pwHits | ForEach-Object { [pscustomobject]@{ Czlonek = $wide[$_]; SID = $_ } })
-            Description = 'Grupa Pre-Windows 2000 Compatible Access ma prawo odczytu atrybutów i członkostwa większości użytkowników i grup. Everyone lub Anonymous Logon w grupie pozwala wyliczyć konta i grupy domeny bez logowania (anonimowe zapytania SAMR/LDAP), co ułatwia zgadywanie haseł. Authenticated Users to ustawienie domyślne domen zakładanych w trybie zgodności; daje każdemu kontu, także komputera, szerszy odczyt niż potrzebny.'
-            Recommendation = 'Usunąć Everyone i Anonymous Logon. Authenticated Users usunąć po teście zgodności (systemy NT4/Samba, starsze urządzenia i aplikacje wyliczające użytkowników). Zmiana działa po wygaśnięciu tokenów (wylogowanie, restart usług).'
-            Fix = (Fx '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-5-7>'')   # Anonymous Logon',
-                      '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-1-0>'')   # Everyone',
-                      '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-5-11>'')  # Authenticated Users - po teście')
+            Description = $(if ($anon) {
+                    'Grupa Pre-Windows 2000 Compatible Access (Dostęp zgodny z systemami starszymi niż Windows 2000) pozwala czytać dane prawie wszystkich kont i grup w domenie. Należy do niej Everyone lub Anonymous Logon, więc listę kont, grup i ich ustawień może pobrać każdy w sieci, nawet bez konta w domenie. Atakujący dostaje gotową listę loginów do zgadywania haseł i wie, które konta są aktywne, nieużywane albo mają hasło bez wygasania.'
+                } else {
+                    'Grupa Pre-Windows 2000 Compatible Access (Dostęp zgodny z systemami starszymi niż Windows 2000) pozwala czytać dane prawie wszystkich kont i grup w domenie. Należy do niej Authenticated Users, czyli każde zalogowane konto - także zwykły użytkownik, konto usługi czy komputer. Kto przejmie dowolne konto (np. przez phishing), łatwo zrobi spis wszystkich kont: które są aktywne, nieużywane, mają hasło bez wygasania. Nie daje to żadnych uprawnień do zmian i jest ustawieniem domyślnym domen zakładanych w trybie zgodności, dlatego ryzyko jest niskie. Usunięcie wymaga testu: część aplikacji i urządzeń odczytuje konta z AD zwykłym kontem i po zmianie może przestać rozpoznawać użytkowników.'
+                })
+            Recommendation = $(if ($anon) {
+                    'Usunąć z grupy Everyone i Anonymous Logon jak najszybciej - nowoczesne systemy tego nie potrzebują. Authenticated Users (jeśli jest w grupie) usunąć osobno, po teście jak niżej.'
+                } else {
+                    'Zmiana o niskim priorytecie - wykonać po pilniejszych punktach planu. Najpierw na koncie testowym sprawdzić aplikacje i urządzenia korzystające z AD (systemy dziedzinowe, NAS, drukarki ze skanowaniem do folderu, starsze urządzenia i skrypty), potem usunąć Authenticated Users w oknie serwisowym. Zmiana działa po wylogowaniu i restarcie usług; cofnięcie to ponowne dodanie grupy.'
+                })
+            Fix = (Fx @(
+                    if ($pwHits -contains 'S-1-5-7')  { '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-5-7>'')   # Anonymous Logon' }
+                    if ($pwHits -contains 'S-1-1-0')  { '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-1-0>'')   # Everyone' }
+                    if ($pwHits -contains 'S-1-5-11') { '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-5-11>'')  # Authenticated Users - po teście aplikacji'
+                                                        '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Add(''LDAP://<SID=S-1-5-11>'')     # wycofanie zmiany' }
+                  ))
             Mitre = 'T1087.002'
         }
     }
