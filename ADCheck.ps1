@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.27'
+$Version = '0.28'
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
@@ -1776,8 +1776,8 @@ Invoke-Check 'COMPUTERS' {
         Add-IfAny @{
             Id = 'C-LAPS-EXPIRED'; Category = $catComp; Severity = 'Medium'
             Title = 'Komputery z hasłem LAPS, które przestało się zmieniać'
-            Objects = ($lapsRows | Where-Object { $_.Wygasa -and $_.C.LastLogonDate -and $_.C.LastLogonDate -gt $_.Wygasa.AddDays(2) } | ForEach-Object $lapsRow)
-            Description = 'Hasło LAPS wygasło, a komputer od tego czasu był w sieci (logował się do domeny) i go nie zmienił. Zwykle oznacza to usunięte GPO LAPS, brak uprawnień komputera do zapisu hasła albo odinstalowanego klienta LAPS - lokalne hasło przestaje być rotowane.'
+            Objects = ($lapsRows | Where-Object { $_.Wygasa -and $_.C.LastLogonDate -and $_.C.LastLogonDate -gt $_.Wygasa.AddDays(2) -and $_.C.LastLogonDate -ge $staleDt } | ForEach-Object $lapsRow)
+            Description = 'Hasło LAPS wygasło, a komputer od tego czasu był w sieci (logował się do domeny) i go nie zmienił. Zwykle oznacza to usunięte GPO LAPS, brak uprawnień komputera do zapisu hasła albo odinstalowanego klienta LAPS - lokalne hasło przestaje być rotowane. Komputery nieużywane dłużej niż -StaleDays dni są pomijane (ujęte w C-STALE).'
             Recommendation = 'Sprawdzić na komputerze dziennik LAPS i zastosowanie GPO; po naprawie wymusić rotację.'
             Fix = (Fx 'Get-WinEvent -LogName ''Microsoft-Windows-LAPS/Operational'' -MaxEvents 20   # na komputerze', 'Invoke-LapsPolicyProcessing   # na komputerze, Windows LAPS', 'Reset-LapsPassword   # na komputerze, Windows LAPS')
             Mitre = 'T1550.002'
@@ -3143,7 +3143,7 @@ Invoke-Check 'DC-OS' {
 
 $dcMethod = 'pominięte'
 if (-not $SkipDCChecks) {
-    $dcMethod = if ($UseWinRM) { 'rejestr DC przez WinRM (konto admina)' } else { 'sondy sieciowe + GPO z SYSVOL (zwykłe konto)' }
+    $dcMethod = if ($UseWinRM) { 'rejestr DC przez WinRM (konto admina)' } else { 'sondy sieciowe + GPO z SYSVOL (bez -UseWinRM)' }
     $gpoSettings = @{}
     # Uzupełniamy istniejącą tabelę zamiast $script: - działa także przy uruchomieniu jako scriptblock
     if (-not $UseWinRM) { Invoke-Check 'DC-GPO' { $g = Get-DcGpoSettings; foreach ($k in $g.Keys) { $gpoSettings[$k] = $g[$k] } } }
@@ -4663,7 +4663,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 [void]$sb.Append('Przegląd wykonano narzędziem ADCheck na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
 [void]$sb.Append('Punktacja: Critical 25, High 10, Medium 3, Low 1 pkt za znalezisko; wynik obszaru to suma punktów (maks. 100), wynik ogólny to najgorszy obszar. Poziom dojrzałości (1-5) wynika z najpoważniejszego znaleziska. ')
 [void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) oraz z Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller) - nie jest to pełna ocena zgodności z żadnym z nich. ')
-[void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder, GPO domeny/DC oraz konta i grupy uprzywilejowane, konta DC i OU Domain Controllers - usług certyfikatów (ADCS) ani stacji końcowych. ')
+[void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder, GPO domeny/DC oraz konta i grupy uprzywilejowane, konta DC i OU Domain Controllers, a w usługach certyfikatów (AD CS) - szablony, obiekty PKI i ustawienia CA (bez rejestru DC i HTTPS z EPA) - ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")
 [void]$sb.Append('Wartości odczytane z GPO opisują konfigurację zamierzoną; ustawienia lokalne na DC mogą się od niej różnić. Polecenia naprawcze są przykładowe: przed wykonaniem należy sprawdzić ich skutki w środowisku testowym i wprowadzać je zgodnie z zasadami zarządzania zmianami w organizacji.')

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.28 – w przygotowaniu
+
+- C-LAPS-EXPIRED pomija komputery nieużywane dłużej niż `-StaleDays` (są w C-STALE), tak jak C-LAPS-MISSING.
+- Nagłówek raportu: tryb testów DC opisany jako „bez -UseWinRM” zamiast „zwykłe konto” (mylące przy przeglądzie kontem uprzywilejowanym).
+- Załącznik B (metodyka): aktualny zakres – AD CS jest oceniany.
+
 ## 0.27 – 2026-11-07
 
 - **D-ADCS-ESC6**, **-ESC7**, **-ESC11**: ustawienia i uprawnienia samego CA odczytywane przez interfejs administracyjny CA (ICertAdmin2, prawo Read domyślnie dla Authenticated Users), z limitem czasu 30 s na CA. ESC7 jest Critical przy roli ManageCA lub szerokiej grupie.
