@@ -111,7 +111,7 @@ $LdapServer = $Server
 $domainDn   = $rootDse.defaultNamingContext
 $ldapMulti  = @('serviceprincipalname', 'memberof', 'sidhistory', 'objectclass', 'member', 'serverreferencebl',
                 'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl', 'msds-allowedtodelegateto', 'msds-psoappliesto',
-                'certificatetemplates', 'pkiextendedkeyusage', 'mspki-certificate-application-policy', 'mspki-certificate-policy')
+                'certificatetemplates', 'cacertificate', 'pkiextendedkeyusage', 'mspki-certificate-application-policy', 'mspki-certificate-policy')
 
 function ConvertTo-LdapFilterValue([string]$Value) {
     $Value.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29')
@@ -587,6 +587,7 @@ $ruleCatalog = @(
     @{ Id = 'D-ADCS-ESC2';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon: dowolne zastosowanie lub brak EKU (ESC2)' }
     @{ Id = 'D-ADCS-ESC3';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon agenta rejestracji (ESC3)' }
     @{ Id = 'D-ADCS-ESC9';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon bez rozszerzenia SID (ESC9)' }
+    @{ Id = 'D-ADCS-ORPHAN';     O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'CA wycofane, ale nadal zarejestrowane w AD' }
     @{ Id = 'D-ADCS-ESC13';      O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Zasady wystawiania powiązane z grupą (ESC13)' }
     @{ Id = 'D-ADCS-ESC6';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'CA przyjmuje nazwę alternatywną z żądania (ESC6)' }
     @{ Id = 'D-ADCS-ESC7';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawa ManageCA / ManageCertificates dla nie-administratorów (ESC7)' }
@@ -779,6 +780,7 @@ $planMeta = @{
     'D-ADCS-ESC3'      = @(2, 4, 1, 'Na CA ograniczyć agentów rejestracji (Enrollment Agents)')
     'D-ADCS-ESC9'      = @(1, 3, 2, 'Najpierw sprawdzić tryb StrongCertificateBindingEnforcement na DC')
     'D-ADCS-ESC13'     = @(1, 4, 1, '')
+    'D-ADCS-ORPHAN'    = @(1, 3, 1, 'Potwierdzić, że certyfikaty z tego CA nie są już używane (VPN, Wi-Fi, RDP, karty)')
     'D-ADCS-ESC6'      = @(1, 2, 1, 'Restart usługi CertSvc po zmianie')
     'D-ADCS-ESC7'      = @(1, 3, 1, 'Przegląd ról CA (certsrv.msc > Zabezpieczenia)')
     'D-ADCS-ESC11'     = @(1, 2, 2, 'Sprawdzić, czy nie ma klientów XP/2003 wysyłających nieszyfrowane żądania')
@@ -1520,6 +1522,18 @@ Invoke-Check 'PRIV' {
 #region ---------- konta użytkowników ----------
 Invoke-Check 'USERS' {
     $users = @(Find-Ldap -Properties $userProps -Filter '(&(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))')
+    # Nieczytelny userAccountControl (odmowa odczytu w ACL) przechodzi przez filtr "nie wyłączone", choć konto może być wyłączone - nie oceniać go jak aktywnego
+    $usersUnread = @($users | Where-Object { $null -eq $_.useraccountcontrol })
+    $users = @($users | Where-Object { $null -ne $_.useraccountcontrol })
+    Add-IfAny @{
+        Id = 'INFO-USERS-UNREADABLE'; Category = 'Błędy testów'; Severity = 'Info'
+        Title = 'Konta, których stanu nie można odczytać'
+        Objects = ($usersUnread | ForEach-Object { [pscustomobject]@{ Konto = $_.samaccountname; Nazwa = $_.name; Kontener = Get-ParentOU $_.distinguishedname } })
+        Description = $(if ($runAsPriv) { 'Konto przeglądu (uprzywilejowane) nie może odczytać atrybutów userAccountControl i whenCreated tych kont, więc nie wiadomo, czy są włączone i kiedy były używane; testy kont ich nie oceniają. Odmowa odczytu dla administratora oznacza wpis Deny w uprawnieniach obiektu - bywa pozostałością narzędzi do ukrywania kont, ale jest też znaną techniką ukrywania kont przez atakującego.' }
+                       else { 'Konto przeglądu nie może odczytać atrybutów userAccountControl i whenCreated tych kont, więc nie wiadomo, czy są włączone i kiedy były używane; testy kont ich nie oceniają. Przyczyną są ograniczone uprawnienia odczytu na obiektach.' })
+        Recommendation = 'Sprawdzić uprawnienia obiektów (wpisy Deny) i ustalić, kto i kiedy je ustawił; konta niepotrzebne wyłączyć.'
+        Fix = (Fx 'dsacls "<DN konta>" | Select-String -Pattern Deny')
+    }
 
     Add-IfAny @{
         Id = 'U-ASREP'; Category = $catUser; Severity = 'High'
@@ -1906,9 +1920,16 @@ function Get-PrincipalMemberList([string]$Sid) {
         $o = Get-LdapObject -Identity $Sid -Properties objectClass
         if ($o -and (@($o.objectclass) -contains 'group')) {
             $m = @(Get-LdapGroupUsers -GroupSid $Sid | Where-Object Enabled)
+            # Członkostwo przez grupę podstawową (primaryGroupID) nie trafia do atrybutu member - tak należą wszyscy do Domain Users / Domain Computers
+            if ($Sid -like "$dSid-*") {
+                $rid = $Sid.Substring($Sid.LastIndexOf('-') + 1)
+                $m = @(@($m) + @(Find-Ldap -Filter "(&(objectClass=user)(primaryGroupID=$rid))" | Where-Object Enabled) | Where-Object { $_ } | Sort-Object distinguishedname -Unique)
+            }
             $txt = if ($m.Count -eq 0) { '(brak aktywnych kont)' }
                    else { (@($m | Select-Object -First 10 | ForEach-Object { $_.SamAccountName }) -join ', ') + $(if ($m.Count -gt 10) { " (+$($m.Count - 10))" } else { '' }) }
         }
+        # SID z domeny bez obiektu w AD: wpis ACL po usuniętym koncie lub grupie
+        elseif (-not $o -and $Sid -like "$dSid-*") { $txt = '(SID nierozwiązany - obiekt usunięty?)' }
     } catch { $txt = '' }
     $aclMemberCache[$Sid] = $txt
     $txt
@@ -2246,6 +2267,7 @@ $pkiEku = @{ '1.3.6.1.5.5.7.3.2' = 'Client Authentication'; '1.3.6.1.5.2.3.4' = 
              '1.3.6.1.5.5.7.3.4' = 'Secure Email'; '1.3.6.1.4.1.311.10.3.4' = 'EFS'; '1.3.6.1.5.5.7.3.3' = 'Code Signing' }
 
 # Prawa zapisu do obiektu PKI (pełna kontrola, uprawnienia, własność, zapis atrybutów, tworzenie obiektów) i właściciel spoza $Trusted
+$pkiEnrollRight = @([guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55', [guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2')   # Certificate-Enrollment, Certificate-AutoEnrollment
 function Get-PkiWriteAce($Sd, [hashtable]$Trusted, [string]$Obj) {
     if ($Sd -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { return }
     $R = [System.DirectoryServices.ActiveDirectoryRights]
@@ -2258,7 +2280,10 @@ function Get-PkiWriteAce($Sd, [hashtable]$Trusted, [string]$Obj) {
         else {
             if ($r -band $R::WriteDacl)     { $why += 'zmiana uprawnień (WriteDacl)' }
             if ($r -band $R::WriteOwner)    { $why += 'przejęcie własności (WriteOwner)' }
-            if ($r -band $R::WriteProperty) { $why += $(if ($a.ObjectType -eq [guid]::Empty) { 'zapis wszystkich atrybutów' } else { 'zapis atrybutu' }) }
+            # Edytor szablonów zapisuje Enroll/AutoEnroll jako RP+WP+CR z GUID-em prawa rozszerzonego; WP z GUID-em prawa (nie atrybutu) nie pozwala niczego zapisać
+            if (($r -band $R::WriteProperty) -and $pkiEnrollRight -notcontains $a.ObjectType) {
+                $why += $(if ($a.ObjectType -eq [guid]::Empty) { 'zapis wszystkich atrybutów' } else { 'zapis atrybutu' })
+            }
             if ($r -band $R::CreateChild)   { $why += 'tworzenie obiektów' }
         }
         if ($why.Count) { [pscustomobject]@{ Obiekt = $Obj; Podmiot = (Resolve-SidName $sid); Czlonkowie = (Get-PrincipalMemberList $sid); Prawa = ($why -join '; '); SID = $sid } }
@@ -2274,7 +2299,7 @@ function Get-PkiWriteAce($Sd, [hashtable]$Trusted, [string]$Obj) {
 Invoke-Check 'ADCS' {
     $pks = "CN=Public Key Services,CN=Services,$configDn"
     $cas = @()
-    try { $cas = @(Find-Ldap -SearchBase "CN=Enrollment Services,$pks" -Scope OneLevel -Filter '(objectClass=pKIEnrollmentService)' -Properties dNSHostName, certificateTemplates, nTSecurityDescriptor -SecurityDescriptor) }
+    try { $cas = @(Find-Ldap -SearchBase "CN=Enrollment Services,$pks" -Scope OneLevel -Filter '(objectClass=pKIEnrollmentService)' -Properties dNSHostName, certificateTemplates, cACertificate, nTSecurityDescriptor -SecurityDescriptor) }
     catch {
         $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
         if ($e.HResult -ne -2147016656) { throw }   # brak kontenera = AD CS nigdy nie był instalowany
@@ -2297,6 +2322,37 @@ Invoke-Check 'ADCS' {
             if ($h -and $h.SID) { $pkiTrusted[$h.SID.Value] = $true; $caHost["$($ca.name)"] = $h }
         } catch { $null = $_ }
     }
+    # CA wycofane, ale zarejestrowane w AD: brak, wyłączone lub nieużywane konto komputera serwera CA. Sam brak DNS (np. problem po stronie stacji) nie wystarcza.
+    $ntAuth = @{}
+    try {
+        foreach ($b in @((Get-LdapObject -Identity "CN=NTAuthCertificates,$pks" -Properties cACertificate).cacertificate | Where-Object { $_ })) {
+            try { $ntAuth[([System.Security.Cryptography.X509Certificates.X509Certificate2]::new([byte[]]$b)).Thumbprint] = $true } catch { $null = $_ }
+        }
+    } catch { $null = $_ }
+    $caOrphan = @{}   # nazwa CA -> wiersz znaleziska
+    foreach ($ca in $cas) {
+        $hn = "$($ca.dnshostname)"; $h = $caHost["$($ca.name)"]; $why = @()
+        if (-not $hn) { $why += 'brak nazwy DNS serwera w obiekcie CA' }
+        elseif (-not $h) {
+            # Serwer CA z innej domeny lasu nie ma konta w tej domenie - wtedy rozstrzyga dopiero brak DNS
+            $dnsOk = $true; try { $null = [System.Net.Dns]::GetHostAddresses($hn) } catch { $dnsOk = $false }
+            if ($hn -like "*.$($domain.DNSRoot)" -or -not $dnsOk) { $why += "brak konta komputera $hn w domenie" }
+        }
+        elseif (-not $h.Enabled) { $why += 'konto komputera serwera CA wyłączone' }
+        elseif (-not $h.LastLogonDate -or $h.LastLogonDate -lt $staleDt) { $why += "konto komputera serwera CA nieużywane > $StaleDays dni" }
+        if (-not $why.Count) { continue }
+        if ($hn) { try { $null = [System.Net.Dns]::GetHostAddresses($hn) } catch { $why += 'nazwa DNS serwera nie rozwiązuje się' } }
+        $tp = @(@($ca.cacertificate) | Where-Object { $_ } | ForEach-Object { try { ([System.Security.Cryptography.X509Certificates.X509Certificate2]::new([byte[]]$_)) } catch { $null } } | Where-Object { $_ })
+        $caOrphan["$($ca.name)"] = [pscustomobject]@{
+            CA = "$($ca.name)"; Serwer = $(if ($hn) { $hn } else { '—' })
+            OstatnieLogowanie = $(if ($h) { Format-Date $h.LastLogonDate } else { '—' })
+            Przyczyna = ($why -join '; ')
+            WaznyDo = $(if ($tp.Count) { Format-Date (@($tp | Sort-Object NotAfter)[-1].NotAfter) } else { '—' })
+            WNTAuth = [bool]@($tp | Where-Object { $ntAuth.ContainsKey($_.Thumbprint) }).Count
+            Szablony = @($ca.certificatetemplates | Where-Object { $_ }).Count
+        }
+    }
+    $isOrphanOnly = { param($CaNames) @($CaNames | Where-Object { -not $caOrphan.ContainsKey("$_") }).Count -eq 0 }
     $privOther = Get-PrivNonPersonMap
     $privGrp = @{}; foreach ($v in $privGroups.Values) { $privGrp[$v] = $true }
     $isLow = { param($Sid) -not ($pkiTrusted.ContainsKey($Sid) -or $privBySid.ContainsKey($Sid) -or $privOther.ContainsKey($Sid) -or $privGrp.ContainsKey($Sid)) }
@@ -2347,6 +2403,7 @@ Invoke-Check 'ADCS' {
                     EKU = $(if ($ekus.Count) { (@($ekus | ForEach-Object { if ($pkiEku.ContainsKey($_)) { $pkiEku[$_] } else { $_ } }) -join ', ') } else { 'brak (dowolne zastosowanie)' })
                 }
                 if ($Extra) { foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] } }
+                if ($caOrphan.Count) { $o['TylkoWycofaneCA'] = [bool](& $isOrphanOnly $onCa) }
                 $o['Szerokie'] = [bool]@($enr | Where-Object { $broad.ContainsKey($_) }).Count
                 [pscustomobject]$o
             }
@@ -2364,7 +2421,10 @@ Invoke-Check 'ADCS' {
         }
         # ESC4: zmiana opublikowanego szablonu = możliwość zamiany go w ESC1
         foreach ($w in @(Get-PkiWriteAce $sd $pkiTrusted "szablon: $tName")) {
-            if (& $isLow $w.SID) { $esc[4] += ($w | Add-Member -NotePropertyName Szerokie -NotePropertyValue $broad.ContainsKey($w.SID) -PassThru) }
+            if (& $isLow $w.SID) {
+                if ($caOrphan.Count) { $w | Add-Member -NotePropertyName TylkoWycofaneCA -NotePropertyValue ([bool](& $isOrphanOnly $onCa)) }
+                $esc[4] += ($w | Add-Member -NotePropertyName Szerokie -NotePropertyValue $broad.ContainsKey($w.SID) -PassThru)
+            }
         }
     }
 
@@ -2386,6 +2446,7 @@ Invoke-Check 'ADCS' {
     }
     foreach ($ca in $cas) {
         foreach ($w in @(Get-PkiWriteAce $ca.ntsecuritydescriptor $pkiTrusted "obiekt CA: $($ca.name)")) { if (& $isLow $w.SID) { $esc5.Add($w) } }
+        if ($caOrphan.ContainsKey("$($ca.name)")) { foreach ($w in @($esc5 | Where-Object Obiekt -eq "obiekt CA: $($ca.name)")) { $w.Obiekt += ' (CA wycofane)' } }
         $h = $caHost["$($ca.name)"]
         if ($h) {
             $hTrusted = $pkiTrusted.Clone(); $hTrusted.Remove($h.SID.Value)
@@ -2405,6 +2466,7 @@ Invoke-Check 'ADCS' {
     $web = [System.Collections.Generic.List[object]]::new()
     foreach ($ca in $cas) {
         $hn = "$($ca.dnshostname)"
+        if ($caOrphan.ContainsKey("$($ca.name)")) { continue }   # CA wycofane (D-ADCS-ORPHAN) - sondy nie mają sensu
         if (-not $hn) { $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = 'ESC8'; Przyczyna = 'brak nazwy DNS serwera CA w AD' }); continue }
         $code = 0; $hdr = ''; $why = ''
         try {
@@ -2447,7 +2509,7 @@ Invoke-Check 'ADCS' {
     $known = @{ 6 = 0; 7 = 0; 11 = 0 }
     foreach ($ca in $cas) {
         $hn = "$($ca.dnshostname)"; $cfg = "$hn\$($ca.name)"
-        if (-not $hn) { continue }
+        if (-not $hn -or $caOrphan.ContainsKey("$($ca.name)")) { continue }
         if (-not (Test-TcpPort $hn 135 2000)) {
             $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = 'ESC6, ESC7, ESC11 (konfiguracja CA)'; Przyczyna = 'brak łączności RPC (TCP 135) z serwerem CA' }); continue
         }
@@ -2494,13 +2556,26 @@ Invoke-Check 'ADCS' {
     # Reguła bez znaleziska, której nie udało się sprawdzić dla żadnego CA: status zamiast fałszywego zaliczenia
     if (-not $web.Count -and @($adcsUnk | Where-Object Test -like 'ESC8*').Count) { $ruleNote['D-ADCS-ESC8'] = 'Nierozstrzygnięty (brak łączności HTTP z CA)' }
     foreach ($n in 6, 7, 11) { if (-not $known[$n]) { $ruleNote["D-ADCS-ESC$n"] = 'Nierozstrzygnięty (konfiguracja CA niedostępna)' } }
+    if ($caOrphan.Count -eq $cas.Count) { foreach ($n in 6, 7, 8, 11) { $ruleNote["D-ADCS-ESC$n"] = 'Nie dotyczy (tylko wycofane CA)' } }
 
-    $sevOf = { param($Rows, [string]$Hi, [string]$Lo) if (@($Rows | Where-Object Szerokie).Count) { $Hi } else { $Lo } }
+    # Szablon opublikowany wyłącznie na wycofanym CA nie daje dziś certyfikatu - bez najwyższej wagi (ryzyko opisuje D-ADCS-ORPHAN)
+    $sevOf = { param($Rows, [string]$Hi, [string]$Lo) if (@($Rows | Where-Object { $_.Szerokie -and -not $_.TylkoWycofaneCA }).Count) { $Hi } else { $Lo } }
     $show  = { param($Rows) $Rows | Select-Object * -ExcludeProperty Szerokie }
     $verify = 'certutil -v -dstemplate <szablon>   # flagi i EKU szablonu'
     $unpub  = 'certutil -config "<serwer CA>\<nazwa CA>" -SetCATemplates -<szablon>   # zdjęcie szablonu z CA, jeśli zbędny'
     $issued = 'certutil -config "<serwer CA>\<nazwa CA>" -view -restrict "CertificateTemplate=<szablon>" -out "RequestID,RequesterName,CommonName,NotAfter"   # wystawione certyfikaty'
 
+    Add-IfAny @{
+        Id = 'D-ADCS-ORPHAN'; Category = $catPki; Severity = $(if (@($caOrphan.Values | Where-Object WNTAuth).Count) { 'High' } else { 'Medium' })
+        Title = 'CA wycofane, ale nadal zarejestrowane w Active Directory'
+        Objects = @($caOrphan.Values)
+        Description = 'Serwer CA nie działa w domenie (kolumna Przyczyna), ale jego obiekty zostały w AD: usługa rejestracji z opublikowanymi szablonami i certyfikat CA. Gdy certyfikat jest w NTAuthCertificates (kolumna WNTAuth), DC nadal akceptuje do logowania certyfikaty podpisane kluczem tego CA. Kto ma ten klucz - z kopii zapasowej, dysku wycofanego serwera albo maszyny wirtualnej - może wystawić certyfikat dowolnego konta, także administratora domeny (Golden Certificate), bez śladu na żadnym działającym CA. Pozostałości zaciemniają też wyniki pozostałych testów AD CS: szablony opublikowane tylko na tym CA są zgłaszane z niższą wagą (kolumna TylkoWycofaneCA).'
+        Recommendation = 'Potwierdzić, że CA jest wycofane, a wystawione przez nie certyfikaty nie są już potrzebne (VPN, Wi-Fi 802.1X, RDP, karty inteligentne). Następnie usunąć certyfikat z NTAuthCertificates i obiekty CA z kontenerów Enrollment Services, AIA, CDP i Certification Authorities (pkiview.msc). Ustalić, gdzie są kopie klucza prywatnego CA, i zniszczyć je albo przechowywać jak klucze Tier 0.'
+        Fix = (Fx 'certutil -viewdelstore "ldap:///CN=NTAuthCertificates,CN=Public Key Services,CN=Services,<DN konfiguracji>?cACertificate?base?objectClass=certificationAuthority"   # wybrać certyfikat wycofanego CA',
+                  '# pkiview.msc > Zarządzaj kontenerami AD: usunąć wycofane CA z Enrollment Services, AIA, CDP i Certification Authorities',
+                  'Get-ADObject -SearchBase "CN=Public Key Services,CN=Services,<DN konfiguracji>" -LDAPFilter "(cn=<nazwa CA>*)"   # weryfikacja pozostałości')
+        Mitre = 'T1649'
+    }
     Add-IfAny @{
         Id = 'D-ADCS-ESC1'; Category = $catPki; Severity = (& $sevOf $esc[1] 'Critical' 'High')
         Title = 'Szablony certyfikatów z nazwą podmiotu z żądania i uwierzytelnianiem klienta (ESC1)'
@@ -4541,7 +4616,7 @@ foreach ($a in $areaScore.Keys) {
 
 # Zakres oceny: ile reguł faktycznie oceniono; nieocenione obszary mogą zaniżać wynik
 $covTotal = $ruleStatus.Count
-$covDone  = @($ruleStatus | Where-Object { $_.Status -in 'Znalezisko', 'Zaliczony', 'Nie dotyczy' }).Count
+$covDone  = @($ruleStatus | Where-Object { ($_.Status -in @('Znalezisko', 'Zaliczony')) -or ($_.Status -like 'Nie dotyczy*') }).Count
 $covWinRM = @($ruleStatus | Where-Object Status -eq 'Wymaga -UseWinRM').Count
 $covSkip  = @($ruleStatus | Where-Object Status -like 'Pominięty*').Count
 $covErr   = @($ruleStatus | Where-Object Status -eq 'Błąd testu').Count

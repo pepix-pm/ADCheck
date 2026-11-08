@@ -5,6 +5,12 @@
 - C-LAPS-EXPIRED pomija komputery nieużywane dłużej niż `-StaleDays` (są w C-STALE), tak jak C-LAPS-MISSING.
 - Nagłówek raportu: tryb testów DC opisany jako „bez -UseWinRM” zamiast „zwykłe konto” (mylące przy przeglądzie kontem uprzywilejowanym).
 - Załącznik B (metodyka): aktualny zakres – AD CS jest oceniany.
+- D-ADCS-ESC4, D-ADCS-ESC5: domyślne prawo Enroll/AutoEnroll (edytor szablonów zapisuje je jako odczyt + zapis + prawo rozszerzone z GUID-em prawa) nie jest już zgłaszane jako „zapis atrybutu”. Wcześniej domyślne szablony User, Machine i EFS dawały fałszywe Critical ESC4.
+- Kolumna Czlonkowie (testy ACL i AD CS) uwzględnia członkostwo przez grupę podstawową (primaryGroupID), więc Domain Users i Domain Computers nie pokazują już „(brak aktywnych kont)”.
+- **D-ADCS-ORPHAN** (High/Medium): CA wycofane, ale zarejestrowane w AD (brak, wyłączone lub nieużywane konto komputera serwera CA), z informacją, czy certyfikat CA jest nadal w NTAuthCertificates (High). Dla takich CA nie są wykonywane sondy ESC6/7/8/11; gdy wszystkie CA są wycofane, reguły mają status „Nie dotyczy (tylko wycofane CA)” zamiast „Nierozstrzygnięty”.
+- D-ADCS-ESC1/2/3/4/9: szablony opublikowane wyłącznie na wycofanym CA nie podnoszą wagi do najwyższej (kolumna TylkoWycofaneCA).
+- Kolumna Czlonkowie: SID domeny bez obiektu w AD opisany jako „(SID nierozwiązany - obiekt usunięty?)”; ESC5 oznacza obiekt wycofanego CA.
+- Testy kont użytkowników pomijają konta z nieczytelnym userAccountControl (wpis Deny w uprawnieniach), które wcześniej trafiały do U-STALE jako aktywne bez dat. Takie konta są wymienione w nowym znalezisku Info INFO-USERS-UNREADABLE.
 
 ## 0.27 – 2026-11-07
 

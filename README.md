@@ -137,6 +137,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-ADCS-ESC4 | Critical / High | Nie-administratorzy mogą zmieniać opublikowany szablon (pełna kontrola, WriteDacl, WriteOwner, zapis, właściciel) | T1649 |
 | D-ADCS-ESC5 | Critical / High | Prawa zapisu nie-administratorów do kontenerów i obiektów PKI (NTAuthCertificates, obiekt CA, szablony, OID) lub do konta komputera serwera CA | T1649 |
 | D-ADCS-ESC13 | Critical / High | Szablon z zasadą wystawiania powiązaną z grupą (msDS-OIDToGroupLink) dostępny dla nie-administratorów (Critical dla grupy uprzywilejowanej) | T1649 |
+| D-ADCS-ORPHAN | High / Medium | CA wycofane (brak, wyłączone lub nieużywane konto serwera), ale nadal zarejestrowane w AD; High, gdy certyfikat CA jest w NTAuthCertificates | T1649 |
 | D-ADCS-ESC2 | High / Medium | Szablon z EKU Any Purpose lub bez EKU dostępny dla nie-administratorów | T1649 |
 | D-ADCS-ESC7 | Critical / High | Rola zarządzania CA (ManageCA, Critical) lub zarządzania certyfikatami (ManageCertificates) dla nie-administratorów – odczyt uprawnień CA przez interfejs administracyjny CA | T1649 |
 | D-ADCS-ESC6 | High | CA z flagą EDITF_ATTRIBUTESUBJECTALTNAME2 (nazwa alternatywna z żądania) | T1649 |
