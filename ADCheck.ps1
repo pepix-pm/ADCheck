@@ -4534,7 +4534,8 @@ $matrix = @(foreach ($k in $areaNames.Keys) {
     foreach ($m in $models) {
         $g = @($real | Where-Object { $_.Obszar -eq $n -and $_.Model -eq $m })
         [pscustomobject]@{ Obszar = $n; Model = $m; Znaleziska = $g.Count
-                           Punkty = [int](($g | ForEach-Object { $weights[$_.Severity] } | Measure-Object -Sum).Sum) }
+                           Punkty = [int](($g | ForEach-Object { $weights[$_.Severity] } | Measure-Object -Sum).Sum)
+                           Pozycje = @($g | Sort-Object { -$weights[$_.Severity] }, Id) }
     }
 })
 
@@ -4718,6 +4719,10 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:0;height:5px;ba
 .mc{display:flex;justify-content:space-between;gap:8px;padding:6px 9px;margin:4px 0;border-radius:6px;font-size:12px;border-left:4px solid transparent}
 .mc.r0{background:var(--g-bg);color:var(--g);border-left-color:var(--l)}.mc.r1{background:var(--y-bg);color:var(--y);border-left-color:var(--m)}
 .mc.r2{background:var(--o-bg);color:var(--o);border-left-color:var(--h)}.mc.r3{background:var(--r-bg);color:var(--r);border-left-color:var(--c)}
+details.mc{display:block}details.mc>summary{display:flex;justify-content:space-between;gap:8px;cursor:pointer;list-style:none}
+details.mc>summary::-webkit-details-marker{display:none}details.mc>summary span:first-child::before{content:'\25B8  '}details.mc[open]>summary span:first-child::before{content:'\25BE  '}
+.ml{margin:6px 0 2px;padding-left:4px;list-style:none}.ml li{margin:4px 0}.ml a{color:var(--ink)}
+.top{float:right;font-size:12px;font-weight:400}
 .st{display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap}
 .st-ok,.st.r0{background:var(--g-bg);color:var(--g)}.st.r1{background:var(--y-bg);color:var(--y)}.st-err,.st.r2{background:var(--o-bg);color:var(--o)}
 .st-bad,.st.r3{background:var(--r-bg);color:var(--r)}.st-na{background:var(--n-bg);color:var(--n)}
@@ -4753,7 +4758,7 @@ footer img{height:18px;vertical-align:middle;margin-right:6px}
 }
 </style>
 <script>
-function toggleAll(o){document.querySelectorAll('details').forEach(d=>d.open=o)}
+function toggleAll(o){document.querySelectorAll('details:not(.mc)').forEach(d=>d.open=o)}
 window.addEventListener('beforeprint',()=>toggleAll(true));
 // Przycisk "Kopiuj" przy każdym bloku kodu; zapasowo execCommand, gdy schowek API jest niedostępny (np. starsza przeglądarka lub file://)
 function copyText(t){
@@ -4842,12 +4847,21 @@ if ($diff) {
     [void]$sb.Append("<p><b>Nowe znaleziska:</b> $(HtmlEnc (($diff.Nowe) -join ', '))</p><p><b>Usunięte (naprawione):</b> $(HtmlEnc (($diff.Usuniete) -join ', '))</p></section>")
 }
 
-[void]$sb.Append('<section><h2>Macierz ryzyka</h2><p class="note">Punkty znalezisk w podziale na obszary i rodzaje ryzyka. Zielone - brak problemów, żółte 1-9 pkt, pomarańczowe 10-29 pkt, czerwone 30+ pkt.</p><div class="matrix">')
+[void]$sb.Append('<section id="macierz"><h2>Macierz ryzyka</h2><p class="note">Punkty znalezisk w podziale na obszary i rodzaje ryzyka. Zielone - brak problemów, żółte 1-9 pkt, pomarańczowe 10-29 pkt, czerwone 30+ pkt. Kliknięcie pola ze znaleziskami pokazuje linki do ich szczegółów.</p><div class="matrix">')
 foreach ($a in $areaScore.Keys) {
     [void]$sb.Append("<div class=`"mcol`"><div class=`"mh`">$(HtmlEnc $a) <b>$($areaScore[$a])</b></div>")
     foreach ($c in @($matrix | Where-Object Obszar -eq $a)) {
         $t = if ($c.Znaleziska) { "$($c.Punkty) pkt / $($c.Znaleziska) zn." } else { 'OK' }
-        [void]$sb.Append("<div class=`"mc $(Get-ScoreClass $c.Punkty)`"><span>$(HtmlEnc $c.Model)</span><span>$t</span></div>")
+        if ($c.Znaleziska) {
+            # pole rozwijane: lista znalezisk z odnośnikami do szczegółów (bez przewijania raportu)
+            [void]$sb.Append("<details class=`"mc $(Get-ScoreClass $c.Punkty)`"><summary><span>$(HtmlEnc $c.Model)</span><span>$t</span></summary><ul class=`"ml`">")
+            foreach ($f in $c.Pozycje) {
+                [void]$sb.Append("<li>$(Badge $f.Severity) <a href=`"#$(HtmlEnc $f.Id)`">$(HtmlEnc $f.Title)</a></li>")
+            }
+            [void]$sb.Append('</ul></details>')
+        } else {
+            [void]$sb.Append("<div class=`"mc $(Get-ScoreClass $c.Punkty)`"><span>$(HtmlEnc $c.Model)</span><span>$t</span></div>")
+        }
     }
     [void]$sb.Append('</div>')
 }
@@ -4902,7 +4916,7 @@ foreach ($k in 1..3) {
 [void]$sb.Append('<section><h2>Szczegóły znalezisk</h2><p><button onclick="toggleAll(true)">Rozwiń wszystkie</button> <button onclick="toggleAll(false)">Zwiń wszystkie</button></p></section>')
 foreach ($f in $sorted) {
     $sev = $f.Severity.ToLower()
-    [void]$sb.Append("<section class=`"f $sev`" id=`"$(HtmlEnc $f.Id)`"><h3>$(Badge $f.Severity) $(HtmlEnc $f.Title)</h3>")
+    [void]$sb.Append("<section class=`"f $sev`" id=`"$(HtmlEnc $f.Id)`"><h3><a class=`"top`" href=`"#macierz`">&uarr; Macierz ryzyka</a>$(Badge $f.Severity) $(HtmlEnc $f.Title)</h3>")
     $mitre = if ($f.Mitre) { " &nbsp;|&nbsp; MITRE ATT&amp;CK: $(Get-MitreLink $f.Mitre)" } else { '' }
     [void]$sb.Append("<div class=`"meta`">$(HtmlEnc $f.Obszar) / $(HtmlEnc $f.Model) &nbsp;|&nbsp; $(HtmlEnc $f.Category) &nbsp;|&nbsp; ID: $(HtmlEnc $f.Id) &nbsp;|&nbsp; Punkty: $($weights[$f.Severity])$mitre</div>")
     if ($f.NIS2 -or $f.ISO27001) {

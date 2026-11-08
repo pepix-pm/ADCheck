@@ -2,6 +2,7 @@
 
 ## 0.28 – w przygotowaniu
 
+- Raport HTML: pola macierzy ryzyka ze znaleziskami rozwijają się po kliknięciu i pokazują listę znalezisk z odnośnikami do szczegółów; każde znalezisko ma odnośnik powrotny „↑ Macierz ryzyka”.
 - **D-DCSYNC**: zestaw praw replikacji liczony dla podmiotu łącznie z jego grupami (rekursywnie, z grupą podstawową, Everyone i Authenticated Users). DCSync („pełny”) wymaga DS-Replication-Get-Changes i -Get-Changes-All, także z różnych wpisów lub grup; wcześniej sam wpis Get-Changes-All dawał Critical. Niepełny zestaw – Medium; nowa kolumna Zestaw. Gdy grup podmiotu nie da się odczytać, zestaw jest „nieustalony” i traktowany jak pełny.
 - D-ACL-DOMAIN: sam wpis DS-Replication-Get-Changes-In-Filtered-Set nie jest już zgłaszany jako Critical „przejęcie obiektu domeny” – trafia do D-DCSYNC.
 - Członkostwo w grupach uprzywilejowanych uwzględnia grupę podstawową (primaryGroupID) grupy i grup w niej zagnieżdżonych. Konto z primaryGroupID=512 (administrator domeny niewidoczny w liście członków) nie było dotąd traktowane jako uprzywilejowane.
