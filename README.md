@@ -238,7 +238,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-SINGLEDC | Medium | Tylko jeden kontroler domeny | – |
 | DC-MACHINEPWD | Medium | Hasło konta komputera DC starsze niż 45 dni | – |
 | DC-PORTS | Medium | Niedostępne porty usług AD na DC (53, 88, 135, 389, 445, 9389, 3268) | – |
-| D-GPO-SYNC | Medium | Wersja GPO w AD różna od GPT.INI w SYSVOL na DC | – |
+| D-GPO-SYNC | Medium / High | Wersja GPO w AD różna od GPT.INI w SYSVOL na DC; High, gdy podlinkowane GPO nie ma folderu w SYSVOL (ustawienia nie są stosowane) | – |
 | DC-DNS-SRV | Medium | DC bez rekordu SRV `_ldap._tcp.dc._msdcs` | – |
 | DC-REGISTRATION | Medium | Konto DC bez obiektu serwera / NTDS Settings w lesie, niespójne flagi lub zwykły komputer w OU Domain Controllers | T1003.006 |
 | DC-SUBNET | Low | Adres DC poza podsieciami AD lub w podsieci innej lokacji | – |

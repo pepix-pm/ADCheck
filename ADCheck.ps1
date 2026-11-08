@@ -1070,7 +1070,9 @@ function Get-DcLinkedGpo {
             $gpo = $all[$dn.ToLower()]
             if (-not $gpo) { $gpoReadErrors[$dn] = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu albo GPO usunięte, a łącze zostało)'; continue }
             if ($gpo.flags -band 2) { continue }
-            if ($gpo.gPCFileSysPath -and -not (Test-Path -LiteralPath $gpo.gPCFileSysPath)) { $gpoNoFiles["$($gpo.displayName)"] = $gpo.gPCFileSysPath }
+            if ($gpo.gPCFileSysPath -and -not (Test-Path -LiteralPath $gpo.gPCFileSysPath)) {
+                $gpoNoFiles["$($gpo.displayName)"] = $(if ($container -eq $domain.DistinguishedName) { 'domeny' } else { 'OU Domain Controllers' })
+            }
             $gpo
         }
     }
@@ -3962,7 +3964,7 @@ if (-not $SkipDCChecks) {
         $gpoNote = if ($UseWinRM) { 'Wartości odczytano z rejestru i auditpol każdego DC (stan rzeczywisty).' } else { 'Wartości odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona); ustawienia lokalne DC mogą się różnić - dokładny stan daje -UseWinRM.' }
         # GPO bez folderu w SYSVOL: wartości "nieustawione" wynikają z braku plików polityki, a nie z jej treści
         if (-not $UseWinRM -and $gpoNoFiles.Count) {
-            $gpoNote += " Uwaga: GPO $(($gpoNoFiles.Keys | Sort-Object | ForEach-Object { "'$_'" }) -join ', ') podlinkowane do domeny lub OU Domain Controllers nie ma folderu w SYSVOL (albo konto przeglądu nie ma do niego dostępu) - jego ustawienia nie są stosowane, a wartości z niego nie zostały odczytane (patrz D-GPO-SYNC)."
+            $gpoNote += " Uwaga: $(($gpoNoFiles.Keys | Sort-Object | ForEach-Object { "GPO '$_' (podlinkowane do $($gpoNoFiles[$_]))" }) -join ', ') nie ma folderu w SYSVOL (albo konto przeglądu nie ma do niego dostępu) - ustawienia z niego nie są stosowane i nie zostały odczytane (patrz D-GPO-SYNC)."
         }
 
         Add-IfAny @{
@@ -4390,7 +4392,7 @@ if (-not $SkipDCChecks) {
             Objects = $shareRows
             Description = 'DC bez udziałów SYSVOL/NETLOGON nie dostarcza GPO ani skryptów logowania i nie ogłasza się jako pełnoprawny DC. Zwykle oznacza nieukończoną początkową replikację SYSVOL (DFSR) lub błąd po odtworzeniu DC.'
             Recommendation = 'Sprawdzić stan replikacji SYSVOL (zdarzenia DFS Replication 4614/4604, 2213) i wartość SysvolReady na DC.'
-            Fix = (Fx 'dcdiag /s:<DC> /test:netlogons /test:sysvolcheck', 'reg query HKLM\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters /v SysvolReady   # na DC', 'wmic /namespace:\\root\microsoftdfs path dfsrreplicatedfolderinfo get replicatedfoldername,state   # na DC')
+            Fix = (Fx 'dcdiag /s:<DC> /test:netlogons /test:sysvolcheck', 'reg query HKLM\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters /v SysvolReady   # na DC', 'wmic /namespace:\\root\microsoftdfs path dfsrreplicatedfolderinfo get replicatedfoldername,state   # na DC', 'dfsrmig /getglobalstate   # stan migracji SYSVOL FRS->DFSR', 'Test-Path C:\Windows\SYSVOL\domain\scripts   # na DC: bez folderu scripts Netlogon nie tworzy udziału NETLOGON')
         }
 
         $pdc = $domain.PDCEmulator
@@ -4415,6 +4417,17 @@ if (-not $SkipDCChecks) {
     Invoke-Check 'GPO-SYNC' {
         $gpos = @(Find-Ldap -SearchBase "CN=Policies,CN=System,$($domain.DistinguishedName)" -Scope OneLevel `
                   -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, versionNumber)
+        # Gdzie GPO ma aktywne łącza (domena, OU, lokacje) - brak folderu podlinkowanego GPO jest poważniejszy niż odłączonego
+        $gpoLinkedAt = @{}
+        $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
+        foreach ($h in $holders) {
+            foreach ($m in [regex]::Matches("$($h.gplink)", '\[LDAP://([^;\]]+);(\d+)\]')) {
+                if ([int]$m.Groups[2].Value -band 1) { continue }
+                $k = $m.Groups[1].Value.ToLower()
+                if (-not $gpoLinkedAt.ContainsKey($k)) { $gpoLinkedAt[$k] = [System.Collections.Generic.List[string]]::new() }
+                $gpoLinkedAt[$k].Add("$($h.distinguishedname)")
+            }
+        }
         $rows = foreach ($dc in $smbDcs) {
             foreach ($g in $gpos) {
                 $ini = "\\$($dc.HostName)\SYSVOL\$($domain.DNSRoot)\Policies\$($g.Name)\GPT.INI"
@@ -4425,17 +4438,36 @@ if (-not $SkipDCChecks) {
                 catch [System.Management.Automation.ItemNotFoundException] { $v = 'brak folderu GPO' }
                 catch { continue }   # brak dostępu do odczytu - pomijamy
                 if ("$v" -ne "$($g.versionNumber)") {
-                    [pscustomobject]@{ GPO = $g.displayName; Guid = $g.Name; DC = $dc.HostName; WersjaAD = $g.versionNumber; WersjaSYSVOL = $v }
+                    $where = @($gpoLinkedAt["$($g.distinguishedname)".ToLower()])
+                    [pscustomobject]@{ GPO = $g.displayName; Guid = $g.Name; DC = $dc.HostName; WersjaAD = $g.versionNumber; WersjaSYSVOL = $v
+                                       Podlinkowane = $(if ($where.Count) { $where -join '; ' } else { 'nie (brak aktywnych łączy)' }); Aktywne = [bool]$where.Count }
                 }
             }
         }
-        Add-IfAny @{
-            Id = 'D-GPO-SYNC'; Category = $catHealth; Severity = 'Medium'
-            Title = 'GPO niespójne między AD a SYSVOL'
-            Objects = $rows
-            Description = 'Wersja GPO zapisana w AD różni się od pliku GPT.INI w SYSVOL na kontrolerze domeny (lub folderu GPO brak). Komputery mogą otrzymywać nieaktualne lub różne ustawienia zależnie od DC. Pojedyncze różnice zaraz po edycji GPO są normalne - liczy się stan utrzymujący się.'
-            Recommendation = 'Sprawdzić replikację SYSVOL (DFSR) i AD; jeśli różnice się utrzymują - wykonać nieautorytatywną synchronizację SYSVOL na problematycznym DC.'
-            Fix = (Fx 'dcdiag /e /test:sysvolcheck /test:frssysvol', '# konsola GPMC > Status (Infrastructure Status) dla domeny', '# nieautorytatywna synchronizacja DFSR: msDFSR-Enabled=FALSE/TRUE na subskrypcji SYSVOL problematycznego DC (KB2218556)')
+        $rows = @($rows)
+        # Brak folderu podlinkowanego GPO to nie opóźnienie replikacji, tylko GPO, którego komputery nie mogą przetworzyć (zdarzenia 1058/1096)
+        $missLinked = @($rows | Where-Object { $_.WersjaSYSVOL -eq 'brak folderu GPO' -and $_.Aktywne })
+        $shareToo   = [bool]($findings | Where-Object Id -eq 'DC-SYSVOL-SHARE')
+        $common     = if ($shareToo) { ' Jednocześnie na DC brakuje udziału SYSVOL lub NETLOGON (DC-SYSVOL-SHARE) - oba problemy mają prawdopodobnie wspólną przyczynę w zawartości lub replikacji SYSVOL i należy je diagnozować razem.' } else { '' }
+        $fixBase    = @('dcdiag /e /test:sysvolcheck /test:netlogons', 'dfsrmig /getglobalstate   # stan migracji SYSVOL FRS->DFSR', '# konsola GPMC > Status (Infrastructure Status) dla domeny')
+        if ($missLinked.Count) {
+            Add-Finding @{
+                Id = 'D-GPO-SYNC'; Category = $catHealth; Severity = 'High'
+                Title = "Podlinkowane GPO bez folderu w SYSVOL - ustawienia nie są stosowane ($(@($missLinked | Select-Object -ExpandProperty GPO -Unique) -join ', '))"
+                Objects = ($rows | Select-Object GPO, Guid, DC, WersjaAD, WersjaSYSVOL, Podlinkowane)
+                Description = "GPO istnieje w AD i jest podlinkowane (kolumna Podlinkowane), ale na kontrolerze domeny nie ma jego folderu w SYSVOL. To nie jest opóźnienie replikacji: komputery i DC objęte tym GPO nie mogą go przetworzyć (zdarzenia 1058/1096 w dzienniku System), więc ustawienia z niego - np. zasady audytu i przypisania praw z Default Domain Controllers Policy - nie działają. Brak folderu GPO bez aktywnych łączy ma niewielki wpływ.$common"
+                Recommendation = 'Ustalić, kiedy i dlaczego folder zniknął (usunięcie ręczne, odtworzenie DC, błąd DFSR). Przy kilku DC sprawdzić, czy folder jest na innym DC, i wykonać synchronizację SYSVOL. Wbudowane GPO odtwarza dcgpofix (z ustawieniami domyślnymi - wcześniejsze ustawienia trzeba odtworzyć z dokumentacji lub kopii GPO). Zwykłe GPO odtworzyć z kopii (Restore-GPO) albo usunąć i utworzyć ponownie.'
+                Fix = (Fx ($fixBase + @('Get-WinEvent -LogName System -MaxEvents 200 | Where-Object Id -in 1058,1096,1030   # na DC lub komputerze', 'Backup-GPO -All -Path <katalog kopii>', 'dcgpofix /target:DC   # tylko gdy brakuje Default Domain Controllers Policy; /target:Domain dla Default Domain Policy')))
+            }
+        } else {
+            Add-IfAny @{
+                Id = 'D-GPO-SYNC'; Category = $catHealth; Severity = 'Medium'
+                Title = 'GPO niespójne między AD a SYSVOL'
+                Objects = ($rows | Select-Object GPO, Guid, DC, WersjaAD, WersjaSYSVOL, Podlinkowane)
+                Description = "Wersja GPO zapisana w AD różni się od pliku GPT.INI w SYSVOL na kontrolerze domeny (lub folderu GPO brak, a GPO nie ma aktywnych łączy). Przy kilku DC komputery mogą otrzymywać różne ustawienia zależnie od DC. Pojedyncze różnice zaraz po edycji GPO są normalne - liczy się stan utrzymujący się.$common"
+                Recommendation = 'Sprawdzić replikację SYSVOL (DFSR) i AD; jeśli różnice się utrzymują - wykonać nieautorytatywną synchronizację SYSVOL na problematycznym DC. GPO bez łączy i bez folderu można po potwierdzeniu usunąć (poza wbudowanymi GPO).'
+                Fix = (Fx ($fixBase + @('# nieautorytatywna synchronizacja DFSR: msDFSR-Enabled=FALSE/TRUE na subskrypcji SYSVOL problematycznego DC (KB2218556)')))
+            }
         }
     }
 
