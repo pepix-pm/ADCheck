@@ -4499,11 +4499,18 @@ Add-IfAny @{
 #endregion
 
 # GPO nieczytelne: podlinkowane do domeny i OU DC (testy konfiguracji DC) oraz do pozostałych OU i lokacji (testy GPO dla wszystkich komputerów)
+# Obiekt: DN GPO skracany do {GUID} wielkimi literami (gPLink i klucze mają różną wielkość liter); GPO osiągalne w Get-LinkedGpoRegistry istnieje (łącza do usuniętych GPO są tam pomijane)
+function Format-GpoKey([string]$Key) {
+    if ($Key -match '^cn=(\{[0-9a-f-]{36}\}),cn=policies,') { $Matches[1].ToUpper() } else { $Key }
+}
 $gpoReadRows = @($gpoReadErrors.Keys | Sort-Object | ForEach-Object {
-    [pscustomobject]@{ Obiekt = $_; Podlinkowane = $(if ($gpoUnreadWhere.ContainsKey("$_".ToLower())) { $gpoUnreadWhere["$_".ToLower()] } else { 'domena lub OU Domain Controllers' }); Blad = $gpoReadErrors[$_] } })
+    $lk = "$_".ToLower()
+    $known = $gpoUnreadWhere.ContainsKey($lk)
+    [pscustomobject]@{ Obiekt = Format-GpoKey $_; Podlinkowane = $(if ($known) { $gpoUnreadWhere[$lk] } else { 'domena lub OU Domain Controllers' })
+        Blad = $(if ($known) { 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu)' } else { $gpoReadErrors[$_] }) } })
 $gpoReadSeen = @($gpoReadErrors.Keys | ForEach-Object { "$_".ToLower() })
 $gpoReadRows += @($gpoUnreadWhere.Keys | Where-Object { $_ -notin $gpoReadSeen } | Sort-Object | ForEach-Object {
-    [pscustomobject]@{ Obiekt = $_; Podlinkowane = $gpoUnreadWhere[$_]; Blad = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu)' } })
+    [pscustomobject]@{ Obiekt = Format-GpoKey $_; Podlinkowane = $gpoUnreadWhere[$_]; Blad = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu)' } })
 if ($gpoReadRows.Count) {
     Add-Finding @{
         Id = 'INFO-GPO-READ'; Category = 'Błędy testów'; Severity = 'Info'

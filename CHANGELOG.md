@@ -2,7 +2,7 @@
 
 ## 0.28 – w przygotowaniu
 
-- INFO-GPO-READ: lista obejmuje także GPO nieczytelne dla konta przeglądu podlinkowane do pozostałych OU i lokacji (przyczyna statusu „Nierozstrzygnięty” w D-GPO-LLMNR i D-GPO-PSLOG), z nową kolumną Podlinkowane. Zakres oceny opisuje reguły nierozstrzygnięte jako „brak łączności lub dostępu”.
+- INFO-GPO-READ: GPO w kolumnie Obiekt podawane jako {GUID} wielkimi literami (wcześniej DN w różnej wielkości liter); GPO, które istnieje, ale jest nieczytelne dla konta przeglądu, ma zawsze opis „brak prawa odczytu”. Lista obejmuje także GPO nieczytelne dla konta przeglądu podlinkowane do pozostałych OU i lokacji (przyczyna statusu „Nierozstrzygnięty” w D-GPO-LLMNR i D-GPO-PSLOG), z nową kolumną Podlinkowane. Zakres oceny opisuje reguły nierozstrzygnięte jako „brak łączności lub dostępu”.
 - **D-GPO-SYNC**: brak folderu w SYSVOL dla GPO z aktywnym łączem to osobny wariant High („ustawienia nie są stosowane”, zdarzenia 1058/1096, dcgpofix dla wbudowanych GPO); nowa kolumna Podlinkowane. Brak folderu GPO bez łączy pozostaje Medium. Gdy jednocześnie występuje DC-SYSVOL-SHARE, opis wskazuje prawdopodobną wspólną przyczynę; naprawa obu znalezisk zawiera `dfsrmig /getglobalstate`, a DC-SYSVOL-SHARE także sprawdzenie folderu `scripts`.
 - Notka w DC-CIS-* podaje faktyczne miejsce łącza GPO bez folderu (domena lub OU Domain Controllers).
 - D-GPO-UNLINKED: wbudowane GPO (Default Domain Policy, Default Domain Controllers Policy) oznaczone w kolumnie Uwagi jako „nie usuwać”; zalecenie i naprawa dla nich to przywrócenie łącza lub udokumentowanie zastąpienia, a nie Remove-GPO.
