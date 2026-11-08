@@ -1043,6 +1043,8 @@ function Test-Smb1([string]$Computer, [int]$TimeoutMs = 3000) {
 # Uproszczenie: pomijane łącza wyłączone i GPO z wyłączoną częścią Komputer; flaga Enforced nie jest uwzględniana.
 # GPO domeny i OU Domain Controllers, których konto przeglądu nie mogło odczytać (zamiast przerywać testy DC)
 $gpoReadErrors = @{}
+# GPO podlinkowane do domeny lub OU Domain Controllers, których folderu nie ma w SYSVOL (ustawienia nie są stosowane)
+$gpoNoFiles = @{}
 function Get-ErrorText($Err) {
     $e = $Err.Exception
     while ($e.InnerException) { $e = $e.InnerException }
@@ -1068,6 +1070,7 @@ function Get-DcLinkedGpo {
             $gpo = $all[$dn.ToLower()]
             if (-not $gpo) { $gpoReadErrors[$dn] = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu albo GPO usunięte, a łącze zostało)'; continue }
             if ($gpo.flags -band 2) { continue }
+            if ($gpo.gPCFileSysPath -and -not (Test-Path -LiteralPath $gpo.gPCFileSysPath)) { $gpoNoFiles["$($gpo.displayName)"] = $gpo.gPCFileSysPath }
             $gpo
         }
     }
@@ -1530,11 +1533,13 @@ Invoke-Check 'PRIV' {
     }
     # lastLogonTimestamp replikuje się z opóźnieniem do ok. 14 dni - próg 35 dni jak w typowych narzędziach audytowych
     if ($adm.Enabled -and $adm.LastLogonDate -and $adm.LastLogonDate -gt $now.AddDays(-35)) {
+        # Przegląd uruchomiony tym kontem sam aktualizuje lastLogonTimestamp - świeża data nie dowodzi wtedy innego użycia
+        $admSelf = if ($runAsSid -eq "$dSid-500" -and $adm.LastLogonDate -ge $now.Date.AddDays(-1)) { ' Przegląd uruchomiono kontem Administrator, więc ostatnia data logowania może pochodzić z samego przeglądu - użycie konta potwierdzić w dzienniku Security DC. Kolejne przeglądy uruchamiać kontem imiennym.' } else { '' }
         Add-Finding @{
             Id = 'P-ADMLOGIN'; Category = $catPriv; Severity = 'Medium'
             Title = "Wbudowane konto Administrator używane w ostatnich 35 dniach (ostatnio: $(Format-Date $adm.LastLogonDate))"
             Objects = (ConvertTo-UserRow $adm)
-            Description = 'Konto Administrator (RID 500) jest wspólne - z logów nie wynika, kto go użył - i nie podlega blokadzie po błędnych hasłach, więc jest pierwszym celem zgadywania haseł. Regularne użycie oznacza zwykle, że administratorzy nie mają kont imiennych, hasło zna wiele osób albo na tym koncie działają usługi lub zadania zaplanowane. Data pochodzi z lastLogonTimestamp (dokładność do ok. 14 dni).'
+            Description = 'Konto Administrator (RID 500) jest wspólne - z logów nie wynika, kto go użył - i nie podlega blokadzie po błędnych hasłach, więc jest pierwszym celem zgadywania haseł. Regularne użycie oznacza zwykle, że administratorzy nie mają kont imiennych, hasło zna wiele osób albo na tym koncie działają usługi lub zadania zaplanowane. Data pochodzi z lastLogonTimestamp (dokładność do ok. 14 dni).' + $admSelf
             Recommendation = 'Administrować z imiennych kont. Konto Administrator zostawić jako awaryjne z hasłem w sejfie haseł. Ustalić w dzienniku Security DC (zdarzenia 4624/4768), skąd następują logowania, i przenieść usługi oraz zadania na gMSA.'
             Fix = (Fx 'Get-WinEvent -ComputerName <DC> -LogName Security -FilterXPath "*[System[EventID=4768] and EventData[Data[@Name=''TargetSid'']=''{SID}-500'']]" -MaxEvents 50 | Format-List TimeCreated, Message')
             Mitre = 'T1078.002'
@@ -3316,6 +3321,8 @@ Invoke-Check 'DUPLICATES' {
 
 # GPO bez aktywnych łączy (domena, OU, lokacje)
 Invoke-Check 'GPO-LINKS' {
+    # Wbudowane GPO: ich usunięcie psuje narzędzia (dcgpofix, GPMC) i bywa nieodwracalne bez kopii - zalecenie inne niż dla zwykłych GPO
+    $defaultGpo = @{ '{31B2F340-016D-11D2-945F-00C04FB984F9}' = 'Default Domain Policy'; '{6AC1786C-016F-11D2-945F-00C04FB984F9}' = 'Default Domain Controllers Policy' }
     $links = @{}   # DN GPO -> 'on' (choć jedno łącze włączone) | 'off' (tylko wyłączone)
     $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
     foreach ($h in $holders) {
@@ -3328,15 +3335,18 @@ Invoke-Check 'GPO-LINKS' {
         $st = $links["$($g.distinguishedname)".ToLower()]
         if ($st -eq 'on') { continue }
         [pscustomobject]@{ GPO = $g.displayname; Identyfikator = $g.name; Lacza = $(if ($st -eq 'off') { 'tylko wyłączone' } else { 'brak' })
-                           Zmienione = Format-Date $g.whenchanged; Utworzone = Format-Date $g.whencreated }
+                           Zmienione = Format-Date $g.whenchanged; Utworzone = Format-Date $g.whencreated
+                           Uwagi = $(if ($defaultGpo.ContainsKey("$($g.name)".ToUpper())) { "wbudowane GPO ($($defaultGpo["$($g.name)".ToUpper()])) - nie usuwać" } else { '' }) }
     })
+    $rowsDef = @($rows | Where-Object Uwagi)
+    if (-not $rowsDef.Count) { $rows = @($rows | Select-Object * -ExcludeProperty Uwagi) }
     Add-IfAny @{
         Id = 'D-GPO-UNLINKED'; Category = $catDom; Severity = 'Low'
         Title = 'GPO bez aktywnych łączy'
         Objects = ($rows | Sort-Object Zmienione)
         Description = 'Te GPO nie są podlinkowane do domeny, OU ani lokacji (albo mają tylko wyłączone łącza), więc nie działają. Zostają jednak w AD i SYSVOL: zaciemniają obraz konfiguracji, mogą zostać przypadkiem podlinkowane ponownie, a ich pliki w SYSVOL (skrypty, preferencje) czyta każde konto domeny. Łącza z OU innych domen lasu nie są sprawdzane.'
-        Recommendation = 'Potwierdzić z właścicielem, zrobić kopię i usunąć. GPO celowo trzymane jako wzorzec opisać w komentarzu GPO.'
-        Fix = (Fx 'Backup-GPO -Guid <Identyfikator> -Path <katalog kopii>', 'Remove-GPO -Guid <Identyfikator>')
+        Recommendation = 'Potwierdzić z właścicielem, zrobić kopię i usunąć. GPO celowo trzymane jako wzorzec opisać w komentarzu GPO.' + $(if ($rowsDef.Count) { ' Wyjątek: wbudowanych GPO (kolumna Uwagi) nie usuwać - ustalić, czy zastąpiono je celowo innym GPO, i przywrócić łącze albo udokumentować zmianę. Uszkodzone wbudowane GPO odtwarza dcgpofix (z ustawieniami domyślnymi).' } else { '' })
+        Fix = $(if ($rowsDef.Count) { Fx 'Backup-GPO -Guid <Identyfikator> -Path <katalog kopii>', 'Remove-GPO -Guid <Identyfikator>   # tylko zwykłe GPO, nie wbudowane', 'New-GPLink -Guid <Identyfikator wbudowanego GPO> -Target <DN domeny lub OU Domain Controllers>   # przywrócenie łącza, jeśli GPO nie zastąpiono celowo' } else { Fx 'Backup-GPO -Guid <Identyfikator> -Path <katalog kopii>', 'Remove-GPO -Guid <Identyfikator>' })
     }
 }
 
@@ -3950,6 +3960,10 @@ if (-not $SkipDCChecks) {
         $audF  = @($fail | Where-Object Obszar -eq 'Zasady audytu')
         $rigF  = @($fail | Where-Object Obszar -eq 'Przypisanie praw użytkowników')
         $gpoNote = if ($UseWinRM) { 'Wartości odczytano z rejestru i auditpol każdego DC (stan rzeczywisty).' } else { 'Wartości odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona); ustawienia lokalne DC mogą się różnić - dokładny stan daje -UseWinRM.' }
+        # GPO bez folderu w SYSVOL: wartości "nieustawione" wynikają z braku plików polityki, a nie z jej treści
+        if (-not $UseWinRM -and $gpoNoFiles.Count) {
+            $gpoNote += " Uwaga: GPO $(($gpoNoFiles.Keys | Sort-Object | ForEach-Object { "'$_'" }) -join ', ') podlinkowane do domeny lub OU Domain Controllers nie ma folderu w SYSVOL (albo konto przeglądu nie ma do niego dostępu) - jego ustawienia nie są stosowane, a wartości z niego nie zostały odczytane (patrz D-GPO-SYNC)."
+        }
 
         Add-IfAny @{
             Id = 'DC-CIS-REG'; Category = $catCis; Severity = (Get-TopSeverity $regF)
@@ -3972,7 +3986,7 @@ if (-not $SkipDCChecks) {
             Id = 'DC-CIS-RIGHTS'; Category = $catCis; Severity = (Get-TopSeverity $rigF)
             Title = 'Przypisanie praw użytkowników na DC niezgodne z CIS L1'
             Objects = $rigF
-            Description = 'Prawa takie jak logowanie lokalne lub przez RDP na DC, ładowanie sterowników, kopia zapasowa/przywracanie plików czy debugowanie programów pozwalają przejąć kontroler domeny. Domyślna Default Domain Controllers Policy nadaje część z nich grupom operatorów (Account/Server/Print/Backup Operators).'
+            Description = "Prawa takie jak logowanie lokalne lub przez RDP na DC, ładowanie sterowników, kopia zapasowa/przywracanie plików czy debugowanie programów pozwalają przejąć kontroler domeny. Domyślna Default Domain Controllers Policy nadaje część z nich grupom operatorów (Account/Server/Print/Backup Operators). $gpoNote"
             Recommendation = 'Ograniczyć prawa do Administrators zgodnie z kolumną Oczekiwane; grupy operatorów pozostawić puste. Zmieniać w GPO dla OU Domain Controllers.'
             Fix = (Fx '# GPMC > Default Domain Controllers Policy (lub dedykowane GPO) > Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > User Rights Assignment')
             Mitre = 'T1078.002'

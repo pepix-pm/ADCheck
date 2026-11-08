@@ -2,6 +2,9 @@
 
 ## 0.28 – w przygotowaniu
 
+- D-GPO-UNLINKED: wbudowane GPO (Default Domain Policy, Default Domain Controllers Policy) oznaczone w kolumnie Uwagi jako „nie usuwać”; zalecenie i naprawa dla nich to przywrócenie łącza lub udokumentowanie zastąpienia, a nie Remove-GPO.
+- P-ADMLOGIN: gdy przegląd uruchomiono kontem Administrator (RID 500), a ostatnie logowanie jest z dnia przeglądu, opis zaznacza, że data może pochodzić z samego przeglądu.
+- DC-CIS-REG, DC-CIS-AUDIT, DC-CIS-RIGHTS: gdy GPO podlinkowane do domeny lub OU Domain Controllers nie ma folderu w SYSVOL, opis podaje jego nazwę i wyjaśnia, że jego ustawienia nie są stosowane (wartości „nieustawione” wynikają z braku plików).
 - **C-LAPS-NONE**: zgłaszane (High) także wtedy, gdy schemat ma atrybuty LAPS, ale żaden aktywny komputer Windows nie ma hasła LAPS (np. schemat Windows LAPS rozszerzony aktualizacją DC bez wdrożenia). Wcześniej wynik to C-LAPS-MISSING (Medium) z listą wszystkich komputerów.
 - DC-SMB1: naprawa uzupełniona o `Uninstall-WindowsFeature FS-SMB1` dla Windows Server.
 - Raport HTML: pola macierzy ryzyka ze znaleziskami rozwijają się po kliknięciu i pokazują listę znalezisk z odnośnikami do szczegółów; każde znalezisko ma odnośnik powrotny „↑ Macierz ryzyka”.
