@@ -4438,7 +4438,9 @@ if (-not $SkipDCChecks) {
                 catch [System.Management.Automation.ItemNotFoundException] { $v = 'brak folderu GPO' }
                 catch { continue }   # brak dostępu do odczytu - pomijamy
                 if ("$v" -ne "$($g.versionNumber)") {
-                    $where = @($gpoLinkedAt["$($g.distinguishedname)".ToLower()])
+                    # @($null) ma Count 1 - GPO bez łączy wyglądałoby na podlinkowane
+                    $lk = "$($g.distinguishedname)".ToLower()
+                    $where = if ($gpoLinkedAt.ContainsKey($lk)) { @($gpoLinkedAt[$lk]) } else { @() }
                     [pscustomobject]@{ GPO = $g.displayName; Guid = $g.Name; DC = $dc.HostName; WersjaAD = $g.versionNumber; WersjaSYSVOL = $v
                                        Podlinkowane = $(if ($where.Count) { $where -join '; ' } else { 'nie (brak aktywnych łączy)' }); Aktywne = [bool]$where.Count }
                 }
