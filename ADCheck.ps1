@@ -1728,7 +1728,7 @@ Invoke-Check 'COMPUTERS' {
     Add-IfAny @{
         Id = 'C-OS-W10'; Category = $catComp; Severity = 'Medium'
         Title = 'Komputery z Windows 10 (koniec wsparcia: 14.10.2025)'
-        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W10' -and $_.C.LastLogonDate -ge $staleDt } | ForEach-Object { ConvertTo-OsRow $_ })
+        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W10' -and -not ((-not $_.C.LastLogonDate -or $_.C.LastLogonDate -lt $staleDt) -and $_.C.whenCreated -lt $staleDt) } | ForEach-Object { ConvertTo-OsRow $_ })
         Description = "Windows 10 (poza wersjami LTSC) nie otrzymuje poprawek bez płatnej subskrypcji Extended Security Updates (ESU) - tylko dla wersji 22H2. Komputery nieużywane dłużej niż $StaleDays dni są pominięte (patrz C-STALE)."
         Recommendation = 'Migracja do Windows 11 lub potwierdzona subskrypcja ESU; zweryfikować zgodność sprzętu (TPM 2.0, procesor). Komputery w wersji starszej niż 22H2 nie mogą otrzymać ESU.'
         Fix = (Fx '# brak poprawki skryptem - migracja do Windows 11 lub ESU (tylko 22H2)')
@@ -1737,7 +1737,7 @@ Invoke-Check 'COMPUTERS' {
     Add-IfAny @{
         Id = 'C-OS-FEATURE'; Category = $catComp; Severity = 'Medium'
         Title = 'Komputery z Windows 11 w wersji bez wsparcia'
-        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W11' -and $_.L.Koniec -and $_.L.Koniec -lt $now -and $_.C.LastLogonDate -ge $staleDt } | ForEach-Object { ConvertTo-OsRow $_ })
+        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W11' -and $_.L.Koniec -and $_.L.Koniec -lt $now -and -not ((-not $_.C.LastLogonDate -or $_.C.LastLogonDate -lt $staleDt) -and $_.C.whenCreated -lt $staleDt) } | ForEach-Object { ConvertTo-OsRow $_ })
         Description = "Każda wersja Windows 11 (np. 23H2) otrzymuje poprawki przez 24 miesiące (Home/Pro) lub 36 miesięcy (Enterprise/Education). Te komputery nie dostały aktualizacji funkcji i nie otrzymują już poprawek bezpieczeństwa. Komputery nieużywane dłużej niż $StaleDays dni są pominięte (patrz C-STALE)."
         Recommendation = 'Zainstalować bieżącą aktualizację funkcji (Windows Update / WSUS / Intune). Sprawdzić, czy GPO TargetReleaseVersion lub zatwierdzenia w WSUS nie blokują aktualizacji, oraz czy komputery mają miejsce na dysku.'
         Fix = (Fx 'gpresult /h gp.html   # na komputerze: Windows Update > TargetReleaseVersion', 'reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate /v TargetReleaseVersionInfo')
