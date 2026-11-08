@@ -179,7 +179,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | C-UNCONSTR | Critical | Komputery (nie-DC) z delegacją nieograniczoną | T1558 |
 | C-OS-EOL | High | Systemy bez wsparcia (Windows 7/8.1, Server ≤ 2012 R2, wycofane LTSC/SAC) | T1210 |
 | C-LAPS-READ-BROAD | Critical | Hasła LAPS czytelne dla szerokich grup (Domain Users, Authenticated Users…) | T1555 |
-| C-LAPS-NONE | High | Brak LAPS w schemacie | T1550.002 |
+| C-LAPS-NONE | High | Brak LAPS w schemacie albo schemat bez żadnego komputera z hasłem LAPS | T1550.002 |
 | C-LAPS-READABLE | High | Konto użyte do przeglądu (nieuprzywilejowane) widzi hasła LAPS | T1555 |
 | C-OS-W10 | Medium | Windows 10 (poza LTSC) | T1210 |
 | C-OS-FEATURE | Medium | Windows 11 w wersji bez wsparcia (np. 23H2 Pro) | T1210 |

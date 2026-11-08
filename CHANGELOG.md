@@ -2,6 +2,8 @@
 
 ## 0.28 – w przygotowaniu
 
+- **C-LAPS-NONE**: zgłaszane (High) także wtedy, gdy schemat ma atrybuty LAPS, ale żaden aktywny komputer Windows nie ma hasła LAPS (np. schemat Windows LAPS rozszerzony aktualizacją DC bez wdrożenia). Wcześniej wynik to C-LAPS-MISSING (Medium) z listą wszystkich komputerów.
+- DC-SMB1: naprawa uzupełniona o `Uninstall-WindowsFeature FS-SMB1` dla Windows Server.
 - Raport HTML: pola macierzy ryzyka ze znaleziskami rozwijają się po kliknięciu i pokazują listę znalezisk z odnośnikami do szczegółów; każde znalezisko ma odnośnik powrotny „↑ Macierz ryzyka”.
 - **D-DCSYNC**: zestaw praw replikacji liczony dla podmiotu łącznie z jego grupami (rekursywnie, z grupą podstawową, Everyone i Authenticated Users). DCSync („pełny”) wymaga DS-Replication-Get-Changes i -Get-Changes-All, także z różnych wpisów lub grup; wcześniej sam wpis Get-Changes-All dawał Critical. Niepełny zestaw – Medium; nowa kolumna Zestaw. Gdy grup podmiotu nie da się odczytać, zestaw jest „nieustalony” i traktowany jak pełny.
 - D-ACL-DOMAIN: sam wpis DS-Replication-Get-Changes-In-Filtered-Set nie jest już zgłaszany jako Critical „przejęcie obiektu domeny” – trafia do D-DCSYNC.

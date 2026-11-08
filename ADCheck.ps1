@@ -580,7 +580,7 @@ $ruleCatalog = @(
     @{ Id = 'D-KRB-TRUST';       O = 'T'; M = 'Szyfrowanie zaufań';           C = 'KRB-ENC';      T = 'Zaufania bez AES' }
 
     @{ Id = 'P-KRBTGT';          O = 'A'; M = 'Golden Ticket';                C = 'PRIV';         T = 'Stare hasło krbtgt' }
-    @{ Id = 'C-LAPS-NONE';       O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    T = 'LAPS nie wdrożony' }
+    @{ Id = 'C-LAPS-NONE';       O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    T = 'LAPS nie wdrożony (schemat lub komputery)' }
     @{ Id = 'C-LAPS-MISSING';    O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Komputery bez LAPS' }
     @{ Id = 'C-LAPS-EXPIRED';    O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Hasło LAPS przestało się zmieniać' }
     @{ Id = 'C-LAPS-LEGACY';     O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Przestarzały Microsoft LAPS' }
@@ -1852,6 +1852,17 @@ Invoke-Check 'COMPUTERS' {
         $lapsMissing = @($lapsNoTyp | Where-Object { -not ((-not $_.C.LastLogonDate -or $_.C.LastLogonDate -lt $staleDt) -and $_.C.whenCreated -lt $staleDt) })
         $lapsStaleSkip = $lapsNoTyp.Count - $lapsMissing.Count
 
+        if ($lapsRows.Count -gt 0 -and $covered -eq 0) {
+        # Schemat rozszerzony (np. Windows LAPS na DC 2019+ po aktualizacji), ale żaden komputer nie ma hasła LAPS - LAPS nie działa
+        Add-Finding @{
+            Id = 'C-LAPS-NONE'; Category = $catComp; Severity = 'High'
+            Title = 'LAPS nie wdrożony (schemat rozszerzony, żaden komputer nie ma hasła LAPS)'
+            Description = "Schemat AD zawiera atrybuty LAPS, ale żadne z $($lapsRows.Count) aktywnych kont komputerów Windows poza DC nie ma hasła zarządzanego przez LAPS. Lokalne konta administratora mają zwykle to samo hasło na wielu komputerach; przejęcie jednej stacji daje dostęp do pozostałych (pass-the-hash)."
+            Recommendation = 'Wdrożyć Windows LAPS (wbudowany w aktualne Windows 10/11 i Server 2019+) przez GPO: uprawnienie komputerów do zapisu hasła na OU, GPO z kopią hasła w Active Directory i szyfrowaniem.'
+            Fix = (Fx 'Set-LapsADComputerSelfPermission -Identity ''<DN OU z komputerami>''', '# następnie GPO: Computer Configuration > Administrative Templates > System > LAPS > Configure password backup directory = Active Directory', 'Get-WinEvent -LogName ''Microsoft-Windows-LAPS/Operational'' -MaxEvents 20   # na komputerze, po wdrożeniu')
+            Mitre = 'T1550.002'
+        }
+        } else {
         Add-IfAny @{
             Id = 'C-LAPS-MISSING'; Category = $catComp; Severity = 'Medium'
             Title = 'Komputery bez hasła zarządzanego przez LAPS'
@@ -1878,6 +1889,7 @@ Invoke-Check 'COMPUTERS' {
             Recommendation = 'Migracja na Windows LAPS: rozszerzenie schematu, GPO Windows LAPS z szyfrowaniem hasła (dostęp tylko dla wskazanej grupy), po przejściu odinstalowanie klienta legacy.'
             Fix = (Fx 'Update-LapsADSchema', 'Set-LapsADComputerSelfPermission -Identity ''<DN OU>''', '# GPO: Administrative Templates > System > LAPS > Configure password backup directory = Active Directory; Enable password encryption = Enabled')
             Mitre = 'T1550.002'
+        }
         }
     }
 
@@ -3514,7 +3526,7 @@ public static class PepixNetApi {
         Id = 'DC-SMB1'; Category = $catDC; Severity = 'High'; Title = 'SMBv1 włączony na DC'; Objects = $dcSmb1
         Description = 'SMBv1 to przestarzały protokół z krytycznymi podatnościami (m.in. EternalBlue/WannaCry).'
         Recommendation = 'Sprawdzić, czy żaden klient nie korzysta z SMBv1 (Set-SmbServerConfiguration -AuditSmb1Access $true, zdarzenia 3000 w Microsoft-Windows-SMBServer/Audit), potem wyłączyć.'
-        Fix = (Fx 'Set-SmbServerConfiguration -AuditSmb1Access $true -Force   # najpierw audyt', 'Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force', 'Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol')
+        Fix = (Fx 'Set-SmbServerConfiguration -AuditSmb1Access $true -Force   # najpierw audyt', 'Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force', 'Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol', 'Uninstall-WindowsFeature FS-SMB1   # Windows Server; wymaga restartu')
         Mitre = 'T1210'
     }
     Add-IfAny @{
