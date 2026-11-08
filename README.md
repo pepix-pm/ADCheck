@@ -99,7 +99,7 @@ W katalogu `raporty` powstają pliki `AD_<klient>_<domena>_<data>`:
 - Znaleziska należą do jednego z **czterech obszarów ryzyka**: obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie. Wynik obszaru = suma punktów, maks. 100. **Wynik ogólny = najgorszy obszar** (0–100, im mniej, tym lepiej). Gdy suma przekracza 100, raport podaje też pełną sumę (np. 4 i 10 znalezisk Critical dają ten sam wynik 100, ale inną sumę); porównanie z `-Previous` pokazuje wtedy zmianę sumy.
 - **Klasa ekspozycji A–E** wynika z najpoważniejszego znaleziska (Critical = E, High = D, Medium = C, Low = B, brak = A). Opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa organizacji.
 - **Macierz ryzyka** pokazuje punkty w podziale obszar × rodzaj ryzyka (np. „Łamanie haseł”, „Pass-the-hash”, „Replikacja i kondycja”).
-- **Sprawdzone reguły** – status każdego testu: znalezisko, zaliczony, nie dotyczy, pominięty, wymaga `-UseWinRM`, błąd testu.
+- **Sprawdzone reguły** – status każdego testu: znalezisko, zaliczony, zaliczony warunkowo (np. ustawienie tylko w GPO podlinkowanym do OU – zakres do potwierdzenia), nie dotyczy, pominięty, wymaga `-UseWinRM`, błąd testu, nierozstrzygnięty.
 
 - **Plan naprawczy** – znaleziska w trzech etapach (do 30 dni / 30–90 dni / do 12 miesięcy) z szacunkiem pracochłonności i uwagami (zależności, kolejność). Znaleziska krytyczne zawsze w etapie 1. Szacunki są w tabeli `$planMeta` w skrypcie – warto je dostosować do własnych doświadczeń z wdrożeń.
 - **Odniesienie do NIS2 / UKSC i ISO/IEC 27001:2022** – każde znalezisko jest przypisane (przez rodzaj ryzyka, `$complianceMap`) do środków z art. 21 ust. 2 NIS2 (wdrożonych w UKSC, Dz. U. 2026 poz. 252) i zabezpieczeń z załącznika A ISO 27001. Raport pokazuje dla każdego środka liczbę testów AD, znaleziska i punkty. To wskazanie, których wymagań dotyczą problemy techniczne – nie ocena zgodności.
@@ -124,7 +124,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 
 | ID | Waga | Test | MITRE ATT&CK |
 |---|---|---|---|
-| D-DCSYNC | Critical / High | Prawo replikacji haseł (DCSync) dla podmiotów spoza DC i administratorów (High, gdy tylko konto synchronizacji Entra ID) | T1003.006 |
+| D-DCSYNC | Critical / High / Medium | Prawa replikacji haseł (DCSync) dla podmiotów spoza DC i administratorów. Zestaw praw liczony dla podmiotu łącznie z jego grupami: pełny (Get-Changes + Get-Changes-All) – Critical, High, gdy tylko konto synchronizacji Entra ID; niepełny – Medium | T1003.006 |
 | D-ACL-DOMAIN | Critical | GenericAll / WriteDacl / WriteOwner / zapis atrybutów obiektu domeny poza administratorami | T1222.001 |
 | D-ACL-ADMINSDHOLDER | Critical | Niestandardowe prawa zapisu lub resetu hasła na AdminSDHolder | T1098 |
 | D-ACL-GPO | High | GPO podpięte do domeny lub OU Domain Controllers modyfikowalne przez nie-adminów (obiekt AD i katalog SYSVOL) | T1484.001 |
@@ -204,9 +204,9 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-PREWIN2000 | High / Low | Everyone, Anonymous Logon (High) lub Authenticated Users (Low) w Pre-Windows 2000 Compatible Access | T1087.002 |
 | D-DSHEURISTICS | High / Medium | dSHeuristics: anonimowe operacje LDAP (7. znak) lub wyłączone poprawki CVE-2021-42291 (28./29. znak) | T1087.002 |
 | D-DNS-CREATECHILD | Low | Strefy DNS z CreateChild dla Authenticated Users bez rekordu wildcard (ADIDNS spoofing) | T1557 |
-| D-GPO-LLMNR | Medium | Żadne podlinkowane GPO nie wyłącza LLMNR | T1557.001 |
+| D-GPO-LLMNR | Medium | Żadne podlinkowane GPO nie wyłącza LLMNR (ustawienie tylko w GPO na OU/lokacji: „Zaliczony warunkowo”) | T1557.001 |
 | D-GPO-HARDPATH | Medium / Low | GPO osłabia Hardened UNC Paths dla SYSVOL/NETLOGON lub ich brak przy starszych systemach | T1557 |
-| D-GPO-PSLOG | Low | Żadne podlinkowane GPO nie włącza Script Block Logging | T1059.001 |
+| D-GPO-PSLOG | Low | Żadne podlinkowane GPO nie włącza Script Block Logging (ustawienie tylko w GPO na OU/lokacji: „Zaliczony warunkowo”) | T1059.001 |
 | D-GPO-UNLINKED | Low | GPO bez aktywnych łączy do domeny, OU lub lokacji | – |
 | D-SPN-DUP | Low | Ta sama nazwa SPN na kilku kontach w domenie | T1558.003 |
 | D-UPN-DUP | Low | Ta sama nazwa UPN na kilku kontach w domenie | – |

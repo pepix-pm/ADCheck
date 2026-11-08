@@ -4,11 +4,11 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
-    $vars = 'win11Builds', 'win10Ltsc', 'serverEol', 'serverBuilds', 'sacBuilds', 'legacyClient'
+    $vars = 'aclGuid', 'win11Builds', 'win10Ltsc', 'serverEol', 'serverBuilds', 'sacBuilds', 'legacyClient'
     $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
                    $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] }, $false) |
         Where-Object { $_.Left.VariablePath.UserPath -in $vars } | ForEach-Object { . ([scriptblock]::Create($_.Extent.Text)) }
@@ -243,4 +243,67 @@ Describe 'Format-Count' {
         @{ N = 1; Tekst = '1 znalezisko' }; @{ N = 2; Tekst = '2 znaleziska' }; @{ N = 5; Tekst = '5 znalezisk' }
         @{ N = 12; Tekst = '12 znalezisk' }; @{ N = 22; Tekst = '22 znaleziska' }; @{ N = 25; Tekst = '25 znalezisk' }
     ) { Format-Count $N | Should -Be $Tekst }
+}
+
+Describe 'Get-DcSyncSet' {
+    BeforeAll {
+        $rights = @{
+            'S-1-5-21-1-1-1-1001' = @{ GetChanges = $false; GetChangesAll = $true;  Filtered = $false }   # konto: sam -All
+            'S-1-5-21-1-1-1-1002' = @{ GetChanges = $true;  GetChangesAll = $false; Filtered = $false }   # grupa: sam Get-Changes
+            'S-1-5-21-1-1-1-1003' = @{ GetChanges = $true;  GetChangesAll = $true;  Filtered = $false }   # pełny w jednym podmiocie
+            'S-1-5-21-1-1-1-1004' = @{ GetChanges = $false; GetChangesAll = $false; Filtered = $true }    # sam In-Filtered-Set
+        }
+    }
+    It 'pełny zestaw w jednym podmiocie' { Get-DcSyncSet $rights @('S-1-5-21-1-1-1-1003') | Should -BeLike 'pełny*' }
+    It 'pełny zestaw złożony z podmiotu i jego grupy' { Get-DcSyncSet $rights @('S-1-5-21-1-1-1-1001', 'S-1-5-21-1-1-1-1002') | Should -BeLike 'pełny*' }
+    It 'sam Get-Changes-All - niepełny' { Get-DcSyncSet $rights @('S-1-5-21-1-1-1-1001', 'S-1-1-0') | Should -BeLike 'niepełny (brak DS-Replication-Get-Changes)' }
+    It 'sam In-Filtered-Set - niepełny' { Get-DcSyncSet $rights @('S-1-5-21-1-1-1-1004') | Should -BeLike 'niepełny (sam In-Filtered-Set)' }
+    It 'Get-Changes + In-Filtered-Set - zestaw filtrowany' { Get-DcSyncSet $rights @('S-1-5-21-1-1-1-1002', 'S-1-5-21-1-1-1-1004') | Should -BeLike 'zestaw filtrowany*' }
+    It 'brak praw - pusty' { Get-DcSyncSet $rights @('S-1-5-21-1-1-1-9999') | Should -Be '' }
+}
+
+Describe 'Get-ReplicationRights' {
+    BeforeAll {
+        function New-Sd([object[]]$Aces) {
+            $sd = New-Object System.DirectoryServices.ActiveDirectorySecurity
+            foreach ($a in $Aces) {
+                $sid = [System.Security.Principal.SecurityIdentifier]$a.Sid
+                $rule = if ($a.Guid) { New-Object System.DirectoryServices.ActiveDirectoryAccessRule $sid, $a.Rights, $a.Type, ([guid]$a.Guid) }
+                        else { New-Object System.DirectoryServices.ActiveDirectoryAccessRule $sid, $a.Rights, $a.Type }
+                $sd.AddAccessRule($rule)
+            }
+            $sd
+        }
+        $er = [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    }
+    It 'Get-Changes i Get-Changes-All z osobnych wpisów' {
+        $sd = New-Sd @(@{ Sid = 'S-1-5-21-1-1-1-1001'; Rights = $er; Type = $allow; Guid = $aclGuid.GetChanges }
+                       @{ Sid = 'S-1-5-21-1-1-1-1001'; Rights = $er; Type = $allow; Guid = $aclGuid.GetChangesAll })
+        $r = Get-ReplicationRights $sd
+        $r['S-1-5-21-1-1-1-1001'].GetChanges | Should -BeTrue
+        $r['S-1-5-21-1-1-1-1001'].GetChangesAll | Should -BeTrue
+        $r['S-1-5-21-1-1-1-1001'].Filtered | Should -BeFalse
+    }
+    It 'wszystkie prawa rozszerzone i GenericAll obejmują każde prawo replikacji' {
+        $sd = New-Sd @(@{ Sid = 'S-1-5-21-1-1-1-1002'; Rights = $er; Type = $allow }
+                       @{ Sid = 'S-1-5-21-1-1-1-1003'; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; Type = $allow })
+        $r = Get-ReplicationRights $sd
+        foreach ($s in 'S-1-5-21-1-1-1-1002', 'S-1-5-21-1-1-1-1003') {
+            $r[$s].GetChanges | Should -BeTrue
+            $r[$s].GetChangesAll | Should -BeTrue
+            $r[$s].Filtered | Should -BeTrue
+        }
+    }
+    It 'pomija Deny i prawa niezwiązane z replikacją' {
+        $sd = New-Sd @(@{ Sid = 'S-1-5-21-1-1-1-1004'; Rights = $er; Type = [System.Security.AccessControl.AccessControlType]::Deny; Guid = $aclGuid.GetChangesAll }
+                       @{ Sid = 'S-1-5-21-1-1-1-1005'; Rights = [System.DirectoryServices.ActiveDirectoryRights]::ReadProperty; Type = $allow })
+        (Get-ReplicationRights $sd).Count | Should -Be 0
+    }
+    It 'zwraca pustą tabelę dla braku deskryptora' { (Get-ReplicationRights $null).Count | Should -Be 0 }
+}
+
+Describe 'Get-OsLifecycle - daty szacunkowe' {
+    It '26H2 ma datę oznaczoną jako szacunek' { (Get-OsLifecycle 'Windows 11 Pro' '10.0 (26300)').Szacunek | Should -BeTrue }
+    It '25H2 ma datę potwierdzoną' { (Get-OsLifecycle 'Windows 11 Pro' '10.0 (26200)').Szacunek | Should -BeFalse }
 }

@@ -2,6 +2,15 @@
 
 ## 0.28 – w przygotowaniu
 
+- **D-DCSYNC**: zestaw praw replikacji liczony dla podmiotu łącznie z jego grupami (rekursywnie, z grupą podstawową, Everyone i Authenticated Users). DCSync („pełny”) wymaga DS-Replication-Get-Changes i -Get-Changes-All, także z różnych wpisów lub grup; wcześniej sam wpis Get-Changes-All dawał Critical. Niepełny zestaw – Medium; nowa kolumna Zestaw. Gdy grup podmiotu nie da się odczytać, zestaw jest „nieustalony” i traktowany jak pełny.
+- D-ACL-DOMAIN: sam wpis DS-Replication-Get-Changes-In-Filtered-Set nie jest już zgłaszany jako Critical „przejęcie obiektu domeny” – trafia do D-DCSYNC.
+- Członkostwo w grupach uprzywilejowanych uwzględnia grupę podstawową (primaryGroupID) grupy i grup w niej zagnieżdżonych. Konto z primaryGroupID=512 (administrator domeny niewidoczny w liście członków) nie było dotąd traktowane jako uprzywilejowane.
+- D-GPO-LLMNR, D-GPO-PSLOG: ustawienie obecne tylko w GPO podlinkowanych do OU lub lokacji daje status „Zaliczony warunkowo” z listą miejsc podlinkowania (wcześniej „Zaliczony”); GPO nieczytelne dla konta przeglądu – „Nierozstrzygnięty”. Tabele obiektów mają kolumnę Podlinkowane. Zakres oceny w raporcie podaje liczbę reguł zaliczonych warunkowo.
+- DC-SMB1: przekroczenie czasu lub inny błąd odczytu odpowiedzi sondy daje wynik nierozstrzygnięty (DC-UNKNOWN) zamiast „SMB1 wyłączony”. Zerwanie połączenia po negocjacji SMB1 nadal oznacza „wyłączony”.
+- `-Previous`: plik sprawdzany na starcie (struktura raportu ADCheck, zgodna główna wersja `SchemaVersion`), a nie po zakończeniu przeglądu.
+- Brak odpowiedzi LDAP Who am I: ostrzeżenie na konsoli i w nagłówku raportu, że ocena konta przeglądu opiera się na koncie procesu.
+- Windows 11 26H2: data końca wsparcia oznaczona jako szacunek (kolumna KoniecWsparcia „(szacunek)”); szacowane daty nie generują C-OS-FEATURE.
+- Plan naprawczy: zastrzeżenie, że szacunki nie są wyceną ani zobowiązaniem realizacyjnym.
 - **Klasa ekspozycji A–E** zamiast „Poziomu dojrzałości 1–5” (Critical = E, High = D, Medium = C, Low = B, brak = A). Wskaźnik opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa – stara nazwa sugerowała ocenę organizacji. Karty znalezisk nie powtarzają już poziomu (wynika z wagi). JSON: nowe pole `Meta.KlasaEkspozycji`; `Meta.Dojrzalosc` (1–5) zostaje dla zgodności.
 - Wynik przy limicie 100: karta wyniku i konsola podają pełną sumę punktów najgorszego obszaru, a porównanie z `-Previous` – zmianę sumy, gdy któryś wynik przekracza limit (wcześniej 4 i 10 znalezisk Critical dawały ten sam wynik i zmianę 0). JSON: nowe pole `Meta.ObszaryBezLimitu`; obiekt `-Silent`: `WynikBezLimitu`, `KlasaEkspozycji`.
 - JSON: pole `SchemaVersion` (`1.0`) na początku pliku – zmiana główna oznacza niezgodną zmianę struktury, drugorzędna nowe pola.

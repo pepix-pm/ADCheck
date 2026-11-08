@@ -65,8 +65,21 @@ if ([System.Environment]::OSVersion.Platform -ne 'Win32NT') {
 if (-not $Server) {
     $braki.Add('Nie ustalono domeny: stacja/konto poza domeną. Podaj -Server <domena lub DC>.')
 }
+$prev = $null
 if ($Previous -and -not (Test-Path -LiteralPath $Previous -PathType Leaf)) {
     $braki.Add("Nie znaleziono pliku -Previous: $Previous")
+} elseif ($Previous) {
+    # Sprawdzane na starcie, żeby nie stracić całego przebiegu. Zgodność po części głównej wersji schematu;
+    # pliki sprzed 0.28 nie mają SchemaVersion (struktura zgodna z 1.x).
+    try { $prev = Get-Content -LiteralPath $Previous -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $prev = $null }
+    $prevSchema = if ($prev -and $prev.SchemaVersion) { "$($prev.SchemaVersion)" } else { '' }
+    if (-not $prev -or -not $prev.Meta -or -not ($prev.PSObject.Properties.Name -contains 'Znaleziska')) {
+        $braki.Add("Plik -Previous nie jest raportem JSON z ADCheck (brak Meta/Znaleziska): $Previous")
+    } elseif ($prevSchema -and $prevSchema.Split('.')[0] -ne $jsonSchemaVersion.Split('.')[0]) {
+        $braki.Add("Plik -Previous ma niezgodną wersję schematu ($prevSchema; ten skrypt: $jsonSchemaVersion) - użyj raportu z wersji ADCheck o tej samej wersji głównej schematu.")
+    } elseif (-not $prevSchema) {
+        Write-Step '  -Previous: raport sprzed ADCheck 0.28 (bez SchemaVersion) - porównanie bez sumy punktów ponad limit' 'Yellow'
+    }
 }
 
 if ($braki.Count -eq 0) {
@@ -201,11 +214,31 @@ function Get-LdapObject {
     @($r)[0]
 }
 
-# Użytkownicy w grupie (rekursywnie, LDAP_MATCHING_RULE_IN_CHAIN); bez członkostwa przez primaryGroupID
+# Użytkownicy w grupie (rekursywnie, LDAP_MATCHING_RULE_IN_CHAIN) oraz przez grupę podstawową (primaryGroupID) tej grupy
+# lub grupy w niej zagnieżdżonej. Członkostwo przez primaryGroupID nie trafia do atrybutu member/memberOf - konto
+# z primaryGroupID=512 jest administratorem domeny niewidocznym w liście członków (znana technika ukrywania dostępu).
 function Get-LdapGroupUsers([string]$GroupSid, [string[]]$Properties = @()) {
     $g = Get-LdapObject -Identity $GroupSid
     if (-not $g) { throw "nie znaleziono grupy $GroupSid" }
-    Find-Ldap -Properties $Properties -Filter ("(&(objectCategory=person)(objectClass=user)(memberOf:1.2.840.113556.1.4.1941:=" + (ConvertTo-LdapFilterValue $g.distinguishedName) + '))')
+    $dn = ConvertTo-LdapFilterValue $g.distinguishedName
+    $users = @(Find-Ldap -Properties $Properties -Filter "(&(objectCategory=person)(objectClass=user)(memberOf:1.2.840.113556.1.4.1941:=$dn))")
+    # grupa podstawowa może być tylko grupą domenową (SID domeny); grupy wbudowane (S-1-5-32-*) - tylko przez zagnieżdżone grupy domenowe
+    $groupSids = @($GroupSid) + @(Find-Ldap -Filter "(&(objectClass=group)(memberOf:1.2.840.113556.1.4.1941:=$dn))" | Where-Object { $_.SID } | ForEach-Object { $_.SID.Value })
+    # bez 513/514/515 (Domain Users/Guests/Computers): grupa podstawowa niemal wszystkich kont - zagnieżdżenie takiej grupy w grupie
+    # uprzywilejowanej to osobny problem, a rozwinięcie dodałoby wszystkie konta domeny do testów kont uprzywilejowanych
+    $rids = @($groupSids | Where-Object { $_ -like "$dSid-*" } | ForEach-Object { $_.Substring($_.LastIndexOf('-') + 1) } |
+              Where-Object { $_ -notin '513', '514', '515' } | Sort-Object -Unique)
+    if ($rids.Count) {
+        $pg = '(|' + (($rids | ForEach-Object { "(primaryGroupID=$_)" }) -join '') + ')'
+        $users += @(Find-Ldap -Properties $Properties -Filter "(&(objectCategory=person)(objectClass=user)$pg)")
+    }
+    $seen = @{}
+    foreach ($u in $users) {
+        $k = "$($u.distinguishedname)"
+        if ($seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true
+        $u
+    }
 }
 
 # Tożsamość, którą widzi serwer LDAP (operacja rozszerzona Who am I, RFC 4532). Zwraca np. FIRMA\konto albo $null.
@@ -393,7 +426,7 @@ $win11Builds = @{
     22631 = @{ Nazwa = '23H2'; Ent = '2026-11-10'; Pro = '2025-11-11' }
     26100 = @{ Nazwa = '24H2'; Ent = '2027-10-12'; Pro = '2026-10-13' }
     26200 = @{ Nazwa = '25H2'; Ent = '2028-10-10'; Pro = '2027-10-12' }
-    26300 = @{ Nazwa = '26H2'; Ent = '2029-10-09'; Pro = '2028-10-10' }   # szacunek (24/36 mies. od jesieni 2026) - potwierdzić po GA
+    26300 = @{ Nazwa = '26H2'; Ent = '2029-10-09'; Pro = '2028-10-10'; Szacunek = $true }   # szacunek (24/36 mies. od jesieni 2026) - potwierdzić po GA i usunąć Szacunek
 }
 $win10Ltsc = @{
     10240 = @{ Nazwa = 'LTSB 2015'; Koniec = '2025-10-14' }
@@ -412,10 +445,11 @@ $legacyClient = [ordered]@{ 'Windows 8.1' = '2023-01-10'; 'Windows 8' = '2016-01
 
 # Wersja i data końca wsparcia na podstawie atrybutów operatingSystem i operatingSystemVersion ("10.0 (22631)").
 # Typ: Legacy | Serwer | LTSC | W10 | W11 | Inne (system spoza Windows lub nierozpoznany - bez oceny).
+# Szacunek: data końca wsparcia nieopublikowana przez Microsoft (wpis tabeli z Szacunek = $true) - tylko do wglądu, bez znalezisk.
 function Get-OsLifecycle([string]$Os, [string]$Ver) {
     $build = 0
     if ($Ver -match '\((\d+)\)') { $build = [int]$Matches[1] }
-    $r = [pscustomobject]@{ Typ = 'Inne'; Wersja = ''; Koniec = $null }
+    $r = [pscustomobject]@{ Typ = 'Inne'; Wersja = ''; Koniec = $null; Szacunek = $false }
     if ($Os -notmatch 'Windows|Hyper-V Server') { return $r }
 
     foreach ($k in $legacyClient.Keys) {
@@ -459,6 +493,7 @@ function Get-OsLifecycle([string]$Os, [string]$Ver) {
             $ent = $Os -match 'Enterprise|Education' -and $Os -notmatch 'Pro Education'
             $r.Wersja = $b.Nazwa
             $r.Koniec = [datetime]$(if ($ent) { $b.Ent } else { $b.Pro })
+            $r.Szacunek = [bool]$b.Szacunek
         } elseif ($build -gt 26300) { $r.Wersja = "build $build (nowsza niż tabela / Insider)" }   # bez oceny
         else { $r.Wersja = "build $build" }
         return $r
@@ -470,7 +505,7 @@ function Get-OsLifecycle([string]$Os, [string]$Ver) {
 function ConvertTo-OsRow($x) {
     ConvertTo-ComputerRow $x.C |
         Add-Member -NotePropertyName Wersja -NotePropertyValue $x.L.Wersja -PassThru |
-        Add-Member -NotePropertyName KoniecWsparcia -NotePropertyValue (Format-Date $x.L.Koniec) -PassThru
+        Add-Member -NotePropertyName KoniecWsparcia -NotePropertyValue ("$(Format-Date $x.L.Koniec)" + $(if ($x.L.Szacunek) { ' (szacunek)' } else { '' })) -PassThru
 }
 
 # ---------- katalog reguł: obszar ryzyka, model, test źródłowy ----------
@@ -993,7 +1028,13 @@ function Test-Smb1([string]$Computer, [int]$TimeoutMs = 3000) {
         $buf = New-Object byte[] 128
         $n = $s.Read($buf, 0, $buf.Length)
         if ($n -ge 8 -and $buf[4] -eq 0xFF -and $buf[5] -eq 0x53 -and $buf[6] -eq 0x4D -and $buf[7] -eq 0x42) { 'Tak' } else { 'Nie' }
-    } catch { 'Nie' }
+    } catch {
+        # Serwer bez SMB1 zrywa połączenie po negocjacji SMB1 (RST) - to odpowiedź "Nie". Przekroczenie czasu odczytu
+        # i inne błędy nie rozstrzygają (wcześniej dawały "Nie", czyli fałszywe zaliczenie DC-SMB1).
+        $se = $_.Exception
+        while ($se -and $se -isnot [System.Net.Sockets.SocketException]) { $se = $se.InnerException }
+        if ($se -and "$($se.SocketErrorCode)" -in @('ConnectionReset', 'ConnectionAborted', 'Shutdown')) { 'Nie' } else { '?' }
+    }
     finally { $tcp.Close() }
 }
 
@@ -1167,24 +1208,38 @@ function Get-DcGpoPolicy {
 
 # Wszystkie GPO z włączonym łączem (domena, OU, lokacje) -> wpisy rejestru komputera z Registry.pol i preferencji (Registry.xml).
 # Bez kolejności, filtrów zabezpieczeń i WMI: odpowiada na pytanie "czy któreś GPO ustawia X", a nie "co dostaje dany komputer".
+# Kolumna Domena: GPO podlinkowane do korzenia domeny (obejmuje wszystkie komputery, o ile nie blokuje go OU lub filtr);
+# Zakres: miejsca podlinkowania. GPO nieczytelne dla konta przeglądu trafiają do $gpoAllUnread.
+$gpoAllUnread = [System.Collections.Generic.List[string]]::new()
 function Get-LinkedGpoRegistry {
     $links = @{}
     $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
     foreach ($h in $holders) {
         foreach ($m in [regex]::Matches("$($h.gplink)", '\[LDAP://([^;\]]+);(\d+)\]')) {
-            if (-not ([int]$m.Groups[2].Value -band 1)) { $links[$m.Groups[1].Value.ToLower()] = $true }
+            if (-not ([int]$m.Groups[2].Value -band 1)) {
+                $k = $m.Groups[1].Value.ToLower()
+                if (-not $links.ContainsKey($k)) { $links[$k] = [System.Collections.Generic.List[string]]::new() }
+                $links[$k].Add("$($h.distinguishedname)")
+            }
         }
     }
     $out = [System.Collections.Generic.List[object]]::new()
     foreach ($dn in $links.Keys) {
         $gpo = $null
-        try { $gpo = Get-LdapObject -Identity $dn -Properties displayName, gPCFileSysPath, flags } catch { $gpo = $null }
-        if (-not $gpo -or ([int]$gpo.flags -band 2) -or -not $gpo.gpcfilesyspath) { continue }
+        # 0x80072030 (brak obiektu): łącze do usuniętego GPO - pomijane; pusty wynik lub inny błąd: GPO nieczytelne dla konta przeglądu
+        $stale = $false
+        try { $gpo = Get-LdapObject -Identity $dn -Properties displayName, gPCFileSysPath, flags }
+        catch { $gpo = $null; $stale = ($_.Exception.HResult -eq -2147016656) -or ($_.Exception.InnerException -and $_.Exception.InnerException.HResult -eq -2147016656) }
+        if ($stale) { continue }
+        if (-not $gpo -or -not $gpo.gpcfilesyspath) { $gpoAllUnread.Add($dn); continue }
+        if ([int]$gpo.flags -band 2) { continue }
+        $isDom = @($links[$dn] | Where-Object { $_ -ieq $domainDn }).Count -gt 0
+        $scope = (@($links[$dn] | ForEach-Object { if ($_ -ieq $domainDn) { 'domena' } else { ($_ -split '(?<!\\),')[0] -replace '^(OU|CN)=', '' } }) | Sort-Object -Unique) -join ', '
         $root = Join-Path $gpo.gpcfilesyspath 'Machine'
         $polFile = Join-Path $root 'Registry.pol'
         if (Test-Path -LiteralPath $polFile) {
             foreach ($e in @(Read-RegistryPol ([System.IO.File]::ReadAllBytes($polFile)))) {
-                $out.Add([pscustomobject]@{ Gpo = $gpo.displayname; Key = $e.Key; Name = $e.Name; Data = $e.Data; Deleted = $e.Deleted })
+                $out.Add([pscustomobject]@{ Gpo = $gpo.displayname; Key = $e.Key; Name = $e.Name; Data = $e.Data; Deleted = $e.Deleted; Domena = $isDom; Zakres = $scope })
             }
         }
         $xmlFile = Join-Path $root 'Preferences\Registry\Registry.xml'
@@ -1195,7 +1250,7 @@ function Get-LinkedGpoRegistry {
                 if ($p.hive -ne 'HKEY_LOCAL_MACHINE' -or $p.action -eq 'D') { continue }
                 $d = $p.value
                 if ($p.type -eq 'REG_DWORD') { try { $d = [Convert]::ToInt64($p.value, 16) } catch { $d = $p.value } }
-                $out.Add([pscustomobject]@{ Gpo = "$($gpo.displayname) (preferencje)"; Key = $p.key; Name = $p.name; Data = $d; Deleted = $false })
+                $out.Add([pscustomobject]@{ Gpo = "$($gpo.displayname) (preferencje)"; Key = $p.key; Name = $p.name; Data = $d; Deleted = $false; Domena = $isDom; Zakres = $scope })
             }
         }
     }
@@ -1332,7 +1387,11 @@ if ($ldapIdentity) {
         if ($acc -and $acc.SID) { $runAsSid = $acc.SID.Value }
     } catch { $runAsSid = $null }
 }
-if (-not $runAsSid) { try { $runAsSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $runAsSid = $null } }
+if (-not $runAsSid) {
+    # Bez LDAP Who am I przyjmowane jest konto procesu - przy runas /netonly może to być inne konto niż użyte do LDAP
+    if (-not $ldapIdentity) { Write-Step '  uwaga: nie ustalono konta LDAP (Who am I) - ocena, czy przegląd wykonano kontem uprzywilejowanym, opiera się na koncie procesu' 'Yellow' }
+    try { $runAsSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $runAsSid = $null }
+}
 # Konto przeglądu jest w grupie uprzywilejowanej (rekursywnie) - sondy uprawnień zwykłego konta są wtedy niemiarodajne
 $runAsPriv = [bool]($runAsSid -and $privBySid.ContainsKey($runAsSid))
 # Na samym DC zapytania LDAP idą przez pętlę zwrotną z tokenem procesu. Bez "Uruchom jako administrator" UAC zostawia grupy administracyjne
@@ -1711,7 +1770,7 @@ Invoke-Check 'COMPUTERS' {
             Wersja          = $f.L.Wersja
             Komputery       = $_.Count
             AktywneOstatnio = @($_.Group | Where-Object { $_.C.LastLogonDate -ge $staleDt }).Count
-            KoniecWsparcia  = (Format-Date $f.L.Koniec)
+            KoniecWsparcia  = ("$(Format-Date $f.L.Koniec)" + $(if ($f.L.Szacunek) { ' (szacunek)' } else { '' }))
         })
     }
 
@@ -1737,7 +1796,7 @@ Invoke-Check 'COMPUTERS' {
     Add-IfAny @{
         Id = 'C-OS-FEATURE'; Category = $catComp; Severity = 'Medium'
         Title = 'Komputery z Windows 11 w wersji bez wsparcia'
-        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W11' -and $_.L.Koniec -and $_.L.Koniec -lt $now -and -not ((-not $_.C.LastLogonDate -or $_.C.LastLogonDate -lt $staleDt) -and $_.C.whenCreated -lt $staleDt) } | ForEach-Object { ConvertTo-OsRow $_ })
+        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W11' -and $_.L.Koniec -and -not $_.L.Szacunek -and $_.L.Koniec -lt $now -and -not ((-not $_.C.LastLogonDate -or $_.C.LastLogonDate -lt $staleDt) -and $_.C.whenCreated -lt $staleDt) } | ForEach-Object { ConvertTo-OsRow $_ })
         Description = "Każda wersja Windows 11 (np. 23H2) otrzymuje poprawki przez 24 miesiące (Home/Pro) lub 36 miesięcy (Enterprise/Education). Te komputery nie dostały aktualizacji funkcji i nie otrzymują już poprawek bezpieczeństwa. Komputery nieużywane dłużej niż $StaleDays dni są pominięte (patrz C-STALE)."
         Recommendation = 'Zainstalować bieżącą aktualizację funkcji (Windows Update / WSUS / Intune). Sprawdzić, czy GPO TargetReleaseVersion lub zatwierdzenia w WSUS nie blokują aktualizacji, oraz czy komputery mają miejsce na dysku.'
         Fix = (Fx 'gpresult /h gp.html   # na komputerze: Windows Update > TargetReleaseVersion', 'reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate /v TargetReleaseVersionInfo')
@@ -1889,7 +1948,8 @@ Invoke-Check 'COMP-OWNER' {
 # Odczyt deskryptorów zabezpieczeń zwykłym kontem (domyślnie czytelne dla Authenticated Users). Pomijane ACE Deny,
 # ACE tylko do dziedziczenia (InheritOnly) i podmioty zaufane (SYSTEM, Administrators, DA, EA, kontrolery domeny).
 $aclGuid = @{
-    GetChangesAll      = [guid]'1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'   # DS-Replication-Get-Changes-All
+    GetChanges         = [guid]'1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'   # DS-Replication-Get-Changes (sam w sobie bez haseł; DCSync = razem z -All)
+    GetChangesAll     = [guid]'1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'   # DS-Replication-Get-Changes-All
     GetChangesFiltered = [guid]'89e95b76-444d-4c62-991a-0facbeda640c'   # DS-Replication-Get-Changes-In-Filtered-Set
     ForceChangePwd     = [guid]'00299570-246d-11d0-a768-00aa006e0529'   # User-Force-Change-Password
     Member             = [guid]'bf9679c0-0de6-11d0-a285-00aa003049e2'   # atrybut member
@@ -1950,6 +2010,74 @@ function Get-PrincipalMemberList([string]$Sid) {
     $txt
 }
 
+# Prawa replikacji na obiekcie domeny wg podmiotu (wpisy Allow bez InheritOnly). GenericAll i wszystkie prawa rozszerzone obejmują każde z nich.
+function Get-ReplicationRights($Sd) {
+    $res = @{}
+    if ($Sd -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { return $res }
+    $R = [System.DirectoryServices.ActiveDirectoryRights]
+    foreach ($a in $Sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if ($a.AccessControlType -ne 'Allow') { continue }
+        if ($a.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+        $r   = $a.ActiveDirectoryRights; $ot = $a.ObjectType
+        $ext = [bool]($r -band $R::ExtendedRight)
+        $all = (($r -band $R::GenericAll) -eq $R::GenericAll) -or ($ext -and $ot -eq [guid]::Empty)
+        $gc  = $all -or ($ext -and $ot -eq $aclGuid.GetChanges)
+        $gca = $all -or ($ext -and $ot -eq $aclGuid.GetChangesAll)
+        $gcf = $all -or ($ext -and $ot -eq $aclGuid.GetChangesFiltered)
+        if (-not ($gc -or $gca -or $gcf)) { continue }
+        $sid = $a.IdentityReference.Value
+        if (-not $res.ContainsKey($sid)) { $res[$sid] = @{ GetChanges = $false; GetChangesAll = $false; Filtered = $false } }
+        if ($gc)  { $res[$sid].GetChanges = $true }
+        if ($gca) { $res[$sid].GetChangesAll = $true }
+        if ($gcf) { $res[$sid].Filtered = $true }
+    }
+    $res
+}
+
+# Zestaw praw replikacji podmiotu łącznie z jego grupami ($Sids = SID podmiotu i SID-y grup, do których należy).
+# DCSync wymaga Get-Changes + Get-Changes-All; prawa mogą pochodzić z różnych wpisów i różnych grup.
+function Get-DcSyncSet([hashtable]$Rights, [string[]]$Sids) {
+    $gc = $false; $gca = $false; $gcf = $false
+    foreach ($s in $Sids) {
+        if (-not $Rights.ContainsKey($s)) { continue }
+        if ($Rights[$s].GetChanges)    { $gc = $true }
+        if ($Rights[$s].GetChangesAll) { $gca = $true }
+        if ($Rights[$s].Filtered)      { $gcf = $true }
+    }
+    if ($gc -and $gca)     { 'pełny (DCSync)' }
+    elseif ($gca)          { 'niepełny (brak DS-Replication-Get-Changes)' }
+    elseif ($gc -and $gcf) { 'zestaw filtrowany (Get-Changes + In-Filtered-Set, bez Get-Changes-All)' }
+    elseif ($gcf)          { 'niepełny (sam In-Filtered-Set)' }
+    else                   { '' }
+}
+
+# SID-y grup podmiotu (rekursywnie, z grupą podstawową) oraz Everyone i Authenticated Users; $null przy błędzie odczytu
+$aclGroupCache = @{}
+function Get-PrincipalGroupSids([string]$Sid) {
+    if ($aclGroupCache.ContainsKey($Sid)) { return $aclGroupCache[$Sid] }
+    $res = $null
+    try {
+        $list = [System.Collections.Generic.List[string]]::new()
+        foreach ($s in $Sid, 'S-1-1-0', 'S-1-5-11') { $list.Add($s) }
+        $o = Get-LdapObject -Identity $Sid -Properties primaryGroupID
+        if ($o) {
+            $dns = @("$($o.distinguishedname)")
+            if ($o.primarygroupid) {
+                $pg = Get-LdapObject -Identity "$dSid-$($o.primarygroupid)"
+                if ($pg) { $list.Add($pg.SID.Value); $dns += "$($pg.distinguishedname)" }
+            }
+            foreach ($dn in $dns) {
+                foreach ($g in @(Find-Ldap -Filter "(&(objectClass=group)(member:1.2.840.113556.1.4.1941:=$(ConvertTo-LdapFilterValue $dn)))")) {
+                    if ($g.SID) { $list.Add($g.SID.Value) }
+                }
+            }
+        }
+        $res = @($list | Select-Object -Unique)
+    } catch { $res = $null }
+    $aclGroupCache[$Sid] = $res
+    $res
+}
+
 function Get-DangerousAces($Sd, [hashtable]$Trusted, [string]$Obj) {
     if ($Sd -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { return }
     foreach ($a in $Sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
@@ -1975,14 +2103,23 @@ Invoke-Check 'ACL' {
     $domSd = (Get-LdapObject -Identity $domainDn -Properties nTSecurityDescriptor -SecurityDescriptor).ntsecuritydescriptor
     $domRows = @(Get-DangerousAces $domSd $trusted $domainDn)
     $syncRe  = '^(MSOL_|AAD_|Sync_|AZUREADSSOACC)'
-    $dcsync  = @($domRows | Where-Object { $_.Prawa -match 'DCSync' } | ForEach-Object {
-        $_ | Add-Member -NotePropertyName Uwagi -NotePropertyValue $(if (($_.Podmiot -split '\\')[-1] -match $syncRe) { 'prawdopodobnie konto synchronizacji Entra ID (Azure AD Connect)' } else { '' }) -PassThru })
+    # Prawa replikacji (Get-Changes-All, In-Filtered-Set, wszystkie prawa rozszerzone) - D-DCSYNC; pozostałe prawa - D-ACL-DOMAIN.
+    # Zestaw liczony dla podmiotu łącznie z jego grupami: DCSync wymaga Get-Changes + Get-Changes-All, często z różnych wpisów.
+    $replRe   = '^(replikacja|wszystkie prawa rozszerzone)'
+    $replMap  = Get-ReplicationRights $domSd
+    $dcsync   = @($domRows | Where-Object { @($_.Prawa -split '; ' | Where-Object { $_ -match $replRe }).Count } | ForEach-Object {
+        $grp = Get-PrincipalGroupSids $_.SID
+        $set = if ($null -eq $grp) { 'nieustalony (nie odczytano grup podmiotu - przyjęto pełny)' } else { Get-DcSyncSet $replMap $grp }
+        # kopia wiersza: ten sam wiersz może trafić też do D-ACL-DOMAIN, bez kolumn Zestaw/Uwagi
+        $_ | Select-Object * | Add-Member -NotePropertyName Zestaw -NotePropertyValue $set -PassThru |
+             Add-Member -NotePropertyName Uwagi -NotePropertyValue $(if (($_.Podmiot -split '\\')[-1] -match $syncRe) { 'prawdopodobnie konto synchronizacji Entra ID (Azure AD Connect)' } else { '' }) -PassThru })
+    $dcFull = @($dcsync | Where-Object { $_.Zestaw -like 'pełny*' -or $_.Zestaw -like 'nieustalony*' })
     Add-IfAny @{
         Id = 'D-DCSYNC'; Category = $catPriv
-        Severity = $(if (@($dcsync | Where-Object { -not $_.Uwagi }).Count) { 'Critical' } else { 'High' })
-        Title = 'Podmioty spoza administratorów i DC z prawem replikacji haseł (DCSync)'
+        Severity = $(if (@($dcFull | Where-Object { -not $_.Uwagi }).Count) { 'Critical' } elseif ($dcFull.Count) { 'High' } else { 'Medium' })
+        Title = $(if ($dcFull.Count) { 'Podmioty spoza administratorów i DC z prawem replikacji haseł (DCSync)' } else { 'Podmioty spoza administratorów i DC z niepełnymi prawami replikacji' })
         Objects = $dcsync
-        Description = 'Prawo DS-Replication-Get-Changes-All na obiekcie domeny pozwala pobrać z DC skróty haseł wszystkich kont, w tym krbtgt i administratorów (atak DCSync), bez logowania na DC i bez śladu na stacjach. Kto przejmie takie konto lub członka takiej grupy, przejmuje domenę. Legalnie to prawo ma zwykle tylko konto synchronizacji Entra ID (Azure AD Connect, MSOL_*) - takie konto wymaga ochrony jak administrator domeny.'
+        Description = 'Prawa DS-Replication-Get-Changes i DS-Replication-Get-Changes-All na obiekcie domeny pozwalają pobrać z DC skróty haseł wszystkich kont, w tym krbtgt i administratorów (atak DCSync), bez logowania na DC i bez śladu na stacjach. Kto przejmie takie konto lub członka takiej grupy, przejmuje domenę. Legalnie oba prawa ma zwykle tylko konto synchronizacji Entra ID (Azure AD Connect, MSOL_*) - takie konto wymaga ochrony jak administrator domeny. Kolumna Zestaw uwzględnia prawa nadane podmiotowi bezpośrednio i przez jego grupy: "pełny" oznacza możliwość DCSync, "niepełny" - brak jednego z praw (DCSync niemożliwy, dopóki podmiot go nie dostanie; zwykle pozostałość do usunięcia).'
         Recommendation = 'Usunąć prawa replikacji wszystkim podmiotom, które ich nie potrzebują. Konto synchronizacji Entra ID: ograniczyć logowanie, długie losowe hasło, serwer synchronizacji traktować jak DC (Tier 0). Monitorować zdarzenie 4662 z GUID 1131f6ad-... spoza DC.'
         Fix = (Fx 'dsacls "{DN}" | Select-String -Context 0,3 "Replicating Directory Changes"   # przegląd',
                   'dsacls "{DN}" /R "<DOMENA>\<podmiot>"   # usuwa wszystkie ACE podmiotu na obiekcie domeny - po weryfikacji').Replace('{DN}', $domainDn)
@@ -1991,7 +2128,7 @@ Invoke-Check 'ACL' {
     Add-IfAny @{
         Id = 'D-ACL-DOMAIN'; Category = $catPriv; Severity = 'Critical'
         Title = 'Podmioty spoza administratorów z prawami pozwalającymi przejąć obiekt domeny'
-        Objects = ($domRows | Where-Object { $_.Prawa -notmatch 'DCSync' -or $_.Prawa -match 'GenericAll|WriteDacl|WriteOwner' })
+        Objects = ($domRows | Where-Object { @($_.Prawa -split '; ' | Where-Object { $_ -notmatch $replRe }).Count })
         Description = 'Pełna kontrola, zmiana uprawnień (WriteDacl), przejęcie własności lub zapis atrybutów obiektu domeny pozwalają nadać sobie DCSync albo zmienić ustawienia całej domeny (np. MachineAccountQuota, gPLink). Typowe źródła: stare instalacje Exchange (grupa Exchange Windows Permissions z WriteDacl - podatność PrivExchange), narzędzia migracyjne, ręczne delegacje sprzed lat.'
         Recommendation = 'Ustalić pochodzenie każdego wpisu i usunąć zbędne. Dla Exchange: zainstalować aktualną CU i uruchomić Setup /PrepareAD (usuwa WriteDacl z obiektu domeny) albo przejść na model Split Permissions.'
         Fix = (Fx 'dsacls "{DN}"   # pełna lista uprawnień obiektu domeny',
@@ -3431,10 +3568,20 @@ if (-not $SkipDCChecks) {
         $gpoReg = @(Get-LinkedGpoRegistry | Where-Object { -not $_.Deleted })
         $pick = { param([string]$KeyEnd, [string]$Name)
                   @($gpoReg | Where-Object { $_.Key -match ([regex]::Escape($KeyEnd) + '$') -and (-not $Name -or $_.Name -eq $Name) }) }
-        $row  = { [pscustomobject]@{ GPO = $_.Gpo; Ustawienie = "$($_.Key)\$($_.Name)"; Wartosc = "$($_.Data)" } }
+        $row  = { [pscustomobject]@{ GPO = $_.Gpo; Ustawienie = "$($_.Key)\$($_.Name)"; Wartosc = "$($_.Data)"; Podlinkowane = $_.Zakres } }
+        # Zaliczenie tylko, gdy ustawienie jest w GPO podlinkowanym do korzenia domeny; samo GPO na OU/lokacji nie dowodzi,
+        # że obejmuje wszystkie komputery. Blokowanie dziedziczenia, filtrowanie zabezpieczeń i WMI nie są oceniane.
+        $cond = { param([string]$Id, [object[]]$Ok)
+                  if (@($Ok).Count -and -not @($Ok | Where-Object Domena).Count) {
+                      $ruleNote[$Id] = "Zaliczony warunkowo (ustawienie tylko w GPO podlinkowanych do: $((@($Ok | ForEach-Object { $_.Zakres }) | Sort-Object -Unique) -join '; ') - sprawdzić, czy obejmują wszystkie komputery)"
+                  } elseif (-not @($Ok).Count -and $gpoAllUnread.Count) {
+                      $ruleNote[$Id] = "Nierozstrzygnięty ($($gpoAllUnread.Count) GPO nieczytelnych dla konta przeglądu)"
+                  } }
 
         $ll = & $pick 'Windows NT\DNSClient' 'EnableMulticast'
-        if (-not @($ll | Where-Object { "$($_.Data)" -eq '0' }).Count) {
+        $llOk = @($ll | Where-Object { "$($_.Data)" -eq '0' })
+        if ($gpoAllUnread.Count -and -not $llOk.Count) { & $cond 'D-GPO-LLMNR' $llOk }
+        elseif (-not $llOk.Count) {
             Add-Finding @{
                 Id = 'D-GPO-LLMNR'; Category = $catDom; Severity = 'Medium'
                 Title = 'Żadne podlinkowane GPO nie wyłącza LLMNR'
@@ -3445,10 +3592,12 @@ if (-not $SkipDCChecks) {
                           'reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" /v EnableMulticast   # weryfikacja na komputerze')
                 Mitre = 'T1557.001'
             }
-        }
+        } else { & $cond 'D-GPO-LLMNR' $llOk }
 
         $ps = & $pick 'PowerShell\ScriptBlockLogging' 'EnableScriptBlockLogging'
-        if (-not @($ps | Where-Object { "$($_.Data)" -eq '1' }).Count) {
+        $psOk = @($ps | Where-Object { "$($_.Data)" -eq '1' })
+        if ($gpoAllUnread.Count -and -not $psOk.Count) { & $cond 'D-GPO-PSLOG' $psOk }
+        elseif (-not $psOk.Count) {
             Add-Finding @{
                 Id = 'D-GPO-PSLOG'; Category = $catDom; Severity = 'Low'
                 Title = 'Żadne podlinkowane GPO nie włącza rejestrowania bloków skryptów PowerShell'
@@ -3458,7 +3607,7 @@ if (-not $SkipDCChecks) {
                 Fix = (Fx '# GPO: Computer Configuration > Administrative Templates > Windows Components > Windows PowerShell > Turn on PowerShell Script Block Logging = Enabled')
                 Mitre = 'T1059.001'
             }
-        }
+        } else { & $cond 'D-GPO-PSLOG' $psOk }
 
         # Hardened UNC Paths: Windows 10+ domyślnie wymaga uwierzytelnienia i integralności dla SYSVOL/NETLOGON; starsze systemy - tylko z GPO
         $hp   = & $pick 'NetworkProvider\HardenedPaths' ''
@@ -4425,7 +4574,7 @@ foreach ($k in 1..3) {
 
 $diff = $null
 if ($Previous) {
-    $prev    = Get-Content $Previous -Raw -Encoding UTF8 | ConvertFrom-Json
+    # $prev wczytany i sprawdzony (Meta, SchemaVersion) w regionie wymagań
     $prevIds = @($prev.Znaleziska | Where-Object Severity -ne 'Info' | ForEach-Object { $_.Id })
     $currIds = @($real | ForEach-Object { $_.Id })
     $diff = [ordered]@{
@@ -4630,7 +4779,8 @@ $sb = [System.Text.StringBuilder]::new()
 [void]$sb.Append("<div class=`"wrap`"><header><div class=`"hd`"><img class=`"logo`" alt=`"PEPIX`" src=`"data:image/png;base64,$logoB64`"><div class=`"ht`"><h1>Przegląd bezpieczeństwa Active Directory</h1>")
 [void]$sb.Append("<p><b>Klient:</b> $(HtmlEnc $Klient) &nbsp;|&nbsp; <b>Domena:</b> $(HtmlEnc $domain.DNSRoot) &nbsp;|&nbsp; <b>Data:</b> $($now.ToString('dd.MM.yyyy HH:mm'))</p>")
 $privTag = $(if ($tokenFiltered) { ' (konto uprzywilejowane, na DC bez podniesienia uprawnień - część obiektów nieczytelna)' } elseif ($runAsPriv) { ' (konto uprzywilejowane)' } else { '' })
-$whoHtml = if (-not $ldapIdentity -or $ldapIdentity -eq $meta.Uruchomil) { "<b>Konto:</b> $(HtmlEnc $meta.Uruchomil)$privTag ze stacji $(HtmlEnc $env:COMPUTERNAME)" }
+$whoHtml = if (-not $ldapIdentity) { "<b>Konto:</b> $(HtmlEnc $meta.Uruchomil)$privTag ze stacji $(HtmlEnc $env:COMPUTERNAME) (konto LDAP nieustalone - przyjęto konto procesu)" }
+           elseif ($ldapIdentity -eq $meta.Uruchomil) { "<b>Konto:</b> $(HtmlEnc $meta.Uruchomil)$privTag ze stacji $(HtmlEnc $env:COMPUTERNAME)" }
            else { "<b>Uruchomił:</b> $(HtmlEnc $meta.Uruchomil) ze stacji $(HtmlEnc $env:COMPUTERNAME) &nbsp;|&nbsp; <b>Konto LDAP:</b> $(HtmlEnc $ldapIdentity)$privTag" }
 [void]$sb.Append("<p>$whoHtml &nbsp;|&nbsp; <b>Testy DC:</b> $(HtmlEnc $dcMethod) &nbsp;|&nbsp; ADCheck $Version</p></div></div>")
 [void]$sb.Append('<div class="conf">DOKUMENT POUFNY - zawiera informacje o podatnościach infrastruktury</div></header>')
@@ -4672,7 +4822,8 @@ foreach ($a in $areaScore.Keys) {
 
 # Zakres oceny: ile reguł faktycznie oceniono; nieocenione obszary mogą zaniżać wynik
 $covTotal = $ruleStatus.Count
-$covDone  = @($ruleStatus | Where-Object { ($_.Status -in @('Znalezisko', 'Zaliczony')) -or ($_.Status -like 'Nie dotyczy*') }).Count
+$covDone  = @($ruleStatus | Where-Object { ($_.Status -in @('Znalezisko', 'Zaliczony')) -or ($_.Status -like 'Nie dotyczy*') -or ($_.Status -like 'Zaliczony warunkowo*') }).Count
+$covCond  = @($ruleStatus | Where-Object Status -like 'Zaliczony warunkowo*').Count
 $covWinRM = @($ruleStatus | Where-Object Status -eq 'Wymaga -UseWinRM').Count
 $covSkip  = @($ruleStatus | Where-Object Status -like 'Pominięty*').Count
 $covErr   = @($ruleStatus | Where-Object Status -eq 'Błąd testu').Count
@@ -4682,7 +4833,7 @@ if ($covWinRM) { $covParts += "$covWinRM wymaga -UseWinRM" }
 if ($covSkip)  { $covParts += "$covSkip pominięto" }
 if ($covErr)   { $covParts += "$covErr z błędem testu" }
 if ($covUnres) { $covParts += "$covUnres nierozstrzygnięto (brak łączności)" }
-$covText = "<b>Zakres oceny:</b> ocenione reguły $covDone z $covTotal ($([Math]::Round(100 * $covDone / [Math]::Max($covTotal, 1)))%)"
+$covText = "<b>Zakres oceny:</b> ocenione reguły $covDone z $covTotal ($([Math]::Round(100 * $covDone / [Math]::Max($covTotal, 1)))%)$(if ($covCond) { ", w tym $covCond zaliczonych warunkowo (zakres GPO do potwierdzenia)" })"
 if ($covParts.Count) { $covText += "; nieocenione: $($covParts -join ', ') - wynik obszarów, których dotyczą, może być zaniżony (szczegóły: <a href=`"#reguly`">Sprawdzone reguły</a>)." } else { $covText += '.' }
 [void]$sb.Append("<p class=`"note`">$covText</p>")
 
@@ -4735,7 +4886,7 @@ foreach ($f in $real) {
 $totMin = ($planSum.Values | ForEach-Object { $_[0] } | Measure-Object -Sum).Sum
 $totMax = ($planSum.Values | ForEach-Object { $_[1] } | Measure-Object -Sum).Sum
 [void]$sb.Append("<p>Szacowana łączna pracochłonność: <b>$(Format-Hours $totMin)-$(Format-Hours $totMax) h</b>.</p>")
-[void]$sb.Append('<p class="note">Szacunki są orientacyjne: obejmują przygotowanie, wdrożenie i weryfikację zmian w typowej domenie, bez zakupów, licencji i migracji pojedynczych stacji. Każdą zmianę należy wprowadzać zgodnie z zasadami zarządzania zmianami w organizacji. Znaleziska krytyczne są zawsze w etapie 1.</p>')
+[void]$sb.Append('<p class="note">Szacunki są orientacyjne i nie są wyceną ani zobowiązaniem realizacyjnym: obejmują przygotowanie, wdrożenie i weryfikację zmian w typowej domenie, bez zakupów, licencji, migracji pojedynczych stacji i aplikacji, uzgodnień z właścicielami systemów ani okien serwisowych. W środowiskach z wieloma lokalizacjami, domenami lub starszymi systemami pracochłonność może być wielokrotnie wyższa. Każdą zmianę należy wprowadzać zgodnie z zasadami zarządzania zmianami w organizacji. Znaleziska krytyczne są zawsze w etapie 1.</p>')
 foreach ($k in 1..3) {
     $g = @($planRows | Where-Object Etap -eq $k)
     if (-not $g.Count) { continue }
@@ -4775,7 +4926,7 @@ $stCls = @{ 'Znalezisko' = 'st-bad'; 'Zaliczony' = 'st-ok'; 'Błąd testu' = 'st
 $okRules = @($ruleStatus | Where-Object Status -eq 'Zaliczony').Count
 [void]$sb.Append("<section id=`"reguly`"><h2>Sprawdzone reguły</h2><p class=`"note`">Zaliczone: $okRules z $($ruleStatus.Count). Reguły pominięte lub wymagające -UseWinRM nie zostały ocenione.</p><div class=`"tw`"><table><thead><tr><th>Status</th><th>ID</th><th>Obszar</th><th>Rodzaj ryzyka</th><th>Test</th><th>Pkt</th></tr></thead><tbody>")
 foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
-    $cls = if ($stCls.ContainsKey($r.Status)) { $stCls[$r.Status] } elseif ($r.Status -like 'Nierozstrzygnięty*') { 'st-err' } else { 'st-na' }
+    $cls = if ($stCls.ContainsKey($r.Status)) { $stCls[$r.Status] } elseif ($r.Status -like 'Nierozstrzygnięty*' -or $r.Status -like 'Zaliczony warunkowo*') { 'st-err' } else { 'st-na' }
     $idCell = if ($r.Status -eq 'Znalezisko') { "<a href=`"#$(HtmlEnc $r.Id)`">$(HtmlEnc $r.Id)</a>" } else { HtmlEnc $r.Id }
     [void]$sb.Append("<tr><td><span class=`"st $cls`">$(HtmlEnc $r.Status)</span></td><td>$idCell</td><td>$(HtmlEnc $r.Obszar)</td><td>$(HtmlEnc $r.Model)</td><td>$(HtmlEnc $r.Test)</td><td>$($r.Punkty)</td></tr>")
 }
