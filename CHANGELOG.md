@@ -10,6 +10,9 @@
 - **D-ADCS-ORPHAN** (High/Medium): CA wycofane, ale zarejestrowane w AD (brak, wyłączone lub nieużywane konto komputera serwera CA), z informacją, czy certyfikat CA jest nadal w NTAuthCertificates (High). Dla takich CA nie są wykonywane sondy ESC6/7/8/11; gdy wszystkie CA są wycofane, reguły mają status „Nie dotyczy (tylko wycofane CA)” zamiast „Nierozstrzygnięty”.
 - D-ADCS-ESC1/2/3/4/9: szablony opublikowane wyłącznie na wycofanym CA nie podnoszą wagi do najwyższej (kolumna TylkoWycofaneCA).
 - Kolumna Czlonkowie: SID domeny bez obiektu w AD opisany jako „(SID nierozwiązany - obiekt usunięty?)”; ESC5 oznacza obiekt wycofanego CA.
+- Przegląd kontem uprzywilejowanym na samym DC bez „Uruchom jako administrator”: ostrzeżenie na konsoli i w nagłówku raportu. UAC zostawia wtedy grupy administracyjne i Pre-Windows 2000 Compatible Access tylko do odmowy, więc konto widzi mniej niż zwykły użytkownik; INFO-USERS-UNREADABLE wskazuje tę przyczynę.
+- D-FGPP-WEAK: nieczytelny kontener PSO (0x8007200A) daje status „Pominięty (kontener PSO niewidoczny dla konta przeglądu)” zamiast błędu testu.
+- D-DNS-CREATECHILD: strefa z nieczytelnymi uprawnieniami nie jest już po cichu zaliczana - trafia do ERR-DNS-ZONES, a reguła bez znaleziska ma status „Nierozstrzygnięty”.
 - Testy kont użytkowników pomijają konta z nieczytelnym userAccountControl (wpis Deny w uprawnieniach), które wcześniej trafiały do U-STALE jako aktywne bez dat. Takie konta są wymienione w nowym znalezisku Info INFO-USERS-UNREADABLE.
 
 ## 0.27 – 2026-11-07

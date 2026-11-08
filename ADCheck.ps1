@@ -1334,6 +1334,15 @@ if ($ldapIdentity) {
 if (-not $runAsSid) { try { $runAsSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $runAsSid = $null } }
 # Konto przeglądu jest w grupie uprzywilejowanej (rekursywnie) - sondy uprawnień zwykłego konta są wtedy niemiarodajne
 $runAsPriv = [bool]($runAsSid -and $privBySid.ContainsKey($runAsSid))
+# Na samym DC zapytania LDAP idą przez pętlę zwrotną z tokenem procesu. Bez "Uruchom jako administrator" UAC zostawia grupy administracyjne
+# i Pre-Windows 2000 Compatible Access tylko do odmowy - konto widzi mniej niż zwykły użytkownik (nieczytelne userAccountControl, strefy DNS, PSO).
+$tokenFiltered = $false
+try {
+    if ($runAsPriv -and @($dcs | Where-Object { "$($_.Name)" -ieq $env:COMPUTERNAME -or "$($_.HostName)" -like "$env:COMPUTERNAME.*" }).Count) {
+        $wp = [System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $tokenFiltered = -not $wp.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+} catch { $tokenFiltered = $false }
 function Get-GroupRows([string]$Name) { @($groupMembers[$Name]) | ForEach-Object { ConvertTo-UserRow $privBySid[$_.SID.Value] } }
 
 $protectedUsersDn = $null
@@ -1359,6 +1368,10 @@ $invPriv = foreach ($gName in $privGroups.Keys) {
 
 if ($ldapIdentity -and $ldapIdentity -ne "$env:USERDOMAIN\$env:USERNAME") { Write-Step "  konto LDAP: $ldapIdentity (proces: $env:USERDOMAIN\$env:USERNAME)" 'Green' }
 Write-Step "  kontrolery domeny: $($dcs.Count) ($(($dcs | ForEach-Object { $_.Name }) -join ', ')), konta uprzywilejowane: $($privUsers.Count)$(if ($runAsPriv) { ' - uruchomiono kontem uprzywilejowanym' })" 'Green'
+if ($tokenFiltered) {
+    Write-Step '  UWAGA: przegląd na kontrolerze domeny bez podniesienia uprawnień (UAC) - część obiektów będzie nieczytelna.' 'Yellow'
+    Write-Step '  Uruchom PowerShell jako administrator albo powtórz przegląd zwykłym kontem z innego komputera.' 'Yellow'
+}
 Write-Step "Testy$(if ($SkipDCChecks) { ' (bez testów DC: -SkipDCChecks)' } elseif ($UseWinRM) { ' (z odczytem DC przez WinRM)' }):"
 #region ---------- konta uprzywilejowane ----------
 Invoke-Check 'PRIV' {
@@ -1529,7 +1542,8 @@ Invoke-Check 'USERS' {
         Id = 'INFO-USERS-UNREADABLE'; Category = 'Błędy testów'; Severity = 'Info'
         Title = 'Konta, których stanu nie można odczytać'
         Objects = ($usersUnread | ForEach-Object { [pscustomobject]@{ Konto = $_.samaccountname; Nazwa = $_.name; Kontener = Get-ParentOU $_.distinguishedname } })
-        Description = $(if ($runAsPriv) { 'Konto przeglądu (uprzywilejowane) nie może odczytać atrybutów userAccountControl i whenCreated tych kont, więc nie wiadomo, czy są włączone i kiedy były używane; testy kont ich nie oceniają. Odmowa odczytu dla administratora oznacza wpis Deny w uprawnieniach obiektu - bywa pozostałością narzędzi do ukrywania kont, ale jest też znaną techniką ukrywania kont przez atakującego.' }
+        Description = $(if ($tokenFiltered) { 'Przegląd uruchomiono na kontrolerze domeny bez podniesienia uprawnień (UAC). Token procesu ma wtedy grupy administracyjne i Pre-Windows 2000 Compatible Access tylko do odmowy, więc konto nie odczytuje userAccountControl i whenCreated tych kont i testy kont ich nie oceniają. To ograniczenie przebiegu, nie konfiguracji domeny: powtórzyć przegląd w PowerShellu uruchomionym jako administrator albo zwykłym kontem z innego komputera.' }
+                       elseif ($runAsPriv) { 'Konto przeglądu (uprzywilejowane) nie może odczytać atrybutów userAccountControl i whenCreated tych kont, więc nie wiadomo, czy są włączone i kiedy były używane; testy kont ich nie oceniają. Przyczyną jest wpis Deny w uprawnieniach obiektu (pozostałość narzędzi do ukrywania kont albo technika ukrywania kont przez atakującego) lub ograniczony token sesji, np. przegląd uruchomiony na kontrolerze domeny. Dla porównania warto powtórzyć przegląd zwykłym kontem z innego komputera.' }
                        else { 'Konto przeglądu nie może odczytać atrybutów userAccountControl i whenCreated tych kont, więc nie wiadomo, czy są włączone i kiedy były używane; testy kont ich nie oceniają. Przyczyną są ograniczone uprawnienia odczytu na obiektach.' })
         Recommendation = 'Sprawdzić uprawnienia obiektów (wpisy Deny) i ustalić, kto i kiedy je ustawił; konta niepotrzebne wyłączyć.'
         Fix = (Fx 'dsacls "<DN konta>" | Select-String -Pattern Deny')
@@ -2954,6 +2968,7 @@ Invoke-Check 'DOMAIN' {
     try {
     # Strefy DNS w AD: CreateChild dla Authenticated Users/Everyone (domyślne - potrzebne do dynamicznej rejestracji) bez rekordu wildcard
     $wideDns = @{ 'S-1-5-11' = 'Authenticated Users'; 'S-1-1-0' = 'Everyone'; 'S-1-5-7' = 'Anonymous Logon' }
+    $dnsUnread = [System.Collections.Generic.List[string]]::new()
     $dnsRows = foreach ($base in @("DC=DomainDnsZones,$domainDn", "DC=ForestDnsZones,$($rootDse.rootDomainNamingContext)", "CN=System,$domainDn")) {
         $zones = @()
         try { $zones = @(Find-Ldap -SearchBase $base -Scope Subtree -Filter '(objectClass=dnsZone)' -Properties nTSecurityDescriptor -SecurityDescriptor) }
@@ -2964,7 +2979,9 @@ Invoke-Check 'DOMAIN' {
             $zones = @()
         }
         foreach ($z in $zones) {
-            if ($z.name -in 'RootDNSServers', '..TrustAnchors' -or $z.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { continue }
+            if ($z.name -in 'RootDNSServers', '..TrustAnchors') { continue }
+            # Nieczytelne uprawnienia strefy to brak wyniku, nie zaliczenie
+            if ($z.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { $dnsUnread.Add("$($z.name)"); continue }
             $who = @($z.ntsecuritydescriptor.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
                      Where-Object { $_.AccessControlType -eq 'Allow' -and ($_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::CreateChild) -and $wideDns.ContainsKey($_.IdentityReference.Value) } |
                      ForEach-Object { $wideDns[$_.IdentityReference.Value] } | Sort-Object -Unique)
@@ -2985,6 +3002,11 @@ Invoke-Check 'DOMAIN' {
         Fix = (Fx 'Add-DnsServerResourceRecordA -ZoneName <strefa> -Name ''*'' -IPv4Address <adres> -ComputerName <DC>',
                   'Get-DnsServerGlobalQueryBlockList -ComputerName <DC>')
         Mitre = 'T1557'
+    }
+    if ($dnsUnread.Count -and -not @($dnsRows).Count) { $ruleNote['D-DNS-CREATECHILD'] = 'Nierozstrzygnięty (uprawnienia stref nieczytelne)' }
+    if ($dnsUnread.Count) {
+        Add-Finding @{ Id = 'ERR-DNS-ZONES'; Category = 'Błędy testów'; Severity = 'Info'
+                       Title = "Test stref DNS (D-DNS-CREATECHILD): konto przeglądu nie odczytało uprawnień stref: $(($dnsUnread | Sort-Object -Unique) -join ', ')" }
     }
     } catch {
         Add-Finding @{ Id = 'ERR-DNS-ZONES'; Category = 'Błędy testów'; Severity = 'Info'
@@ -3049,6 +3071,8 @@ Invoke-Check 'FGPP' {
                              'msDS-PasswordReversibleEncryptionEnabled', 'msDS-PSOAppliesTo')
     } catch {
         $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+        # 0x8007200A: ADSI nie odczytał objectClass kontenera - konto przeglądu nie ma do niego prawa odczytu (domyślnie tylko administratorzy)
+        if ($e.HResult -eq -2147016694) { $ruleNote['D-FGPP-WEAK'] = 'Pominięty (kontener PSO niewidoczny dla konta przeglądu)'; return }
         if ($e.HResult -ne -2147016656) { throw }   # brak kontenera (poziom domeny < 2008) = brak PSO
     }
     $readable = @($pso | Where-Object { $null -ne $_.'msds-minimumpasswordlength' })
@@ -4580,7 +4604,7 @@ $logoB64 = 'iVBORw0KGgoAAAANSUhEUgAAAcsAAAClCAYAAAAzi9bZAAArZElEQVR42u2dB3gU1drH
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.Append("<div class=`"wrap`"><header><div class=`"hd`"><img class=`"logo`" alt=`"PEPIX`" src=`"data:image/png;base64,$logoB64`"><div class=`"ht`"><h1>Przegląd bezpieczeństwa Active Directory</h1>")
 [void]$sb.Append("<p><b>Klient:</b> $(HtmlEnc $Klient) &nbsp;|&nbsp; <b>Domena:</b> $(HtmlEnc $domain.DNSRoot) &nbsp;|&nbsp; <b>Data:</b> $($now.ToString('dd.MM.yyyy HH:mm'))</p>")
-$privTag = $(if ($runAsPriv) { ' (konto uprzywilejowane)' } else { '' })
+$privTag = $(if ($tokenFiltered) { ' (konto uprzywilejowane, na DC bez podniesienia uprawnień - część obiektów nieczytelna)' } elseif ($runAsPriv) { ' (konto uprzywilejowane)' } else { '' })
 $whoHtml = if (-not $ldapIdentity -or $ldapIdentity -eq $meta.Uruchomil) { "<b>Konto:</b> $(HtmlEnc $meta.Uruchomil)$privTag ze stacji $(HtmlEnc $env:COMPUTERNAME)" }
            else { "<b>Uruchomił:</b> $(HtmlEnc $meta.Uruchomil) ze stacji $(HtmlEnc $env:COMPUTERNAME) &nbsp;|&nbsp; <b>Konto LDAP:</b> $(HtmlEnc $ldapIdentity)$privTag" }
 [void]$sb.Append("<p>$whoHtml &nbsp;|&nbsp; <b>Testy DC:</b> $(HtmlEnc $dcMethod) &nbsp;|&nbsp; ADCheck $Version</p></div></div>")
