@@ -1216,6 +1216,7 @@ function Get-DcGpoPolicy {
 # Kolumna Domena: GPO podlinkowane do korzenia domeny (obejmuje wszystkie komputery, o ile nie blokuje go OU lub filtr);
 # Zakres: miejsca podlinkowania. GPO nieczytelne dla konta przeglądu trafiają do $gpoAllUnread.
 $gpoAllUnread = [System.Collections.Generic.List[string]]::new()
+$gpoUnreadWhere = @{}   # DN GPO (małe litery) -> miejsca podlinkowania, do INFO-GPO-READ
 function Get-LinkedGpoRegistry {
     $links = @{}
     $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
@@ -1236,7 +1237,11 @@ function Get-LinkedGpoRegistry {
         try { $gpo = Get-LdapObject -Identity $dn -Properties displayName, gPCFileSysPath, flags }
         catch { $gpo = $null; $stale = ($_.Exception.HResult -eq -2147016656) -or ($_.Exception.InnerException -and $_.Exception.InnerException.HResult -eq -2147016656) }
         if ($stale) { continue }
-        if (-not $gpo -or -not $gpo.gpcfilesyspath) { $gpoAllUnread.Add($dn); continue }
+        if (-not $gpo -or -not $gpo.gpcfilesyspath) {
+            $gpoAllUnread.Add($dn)
+            $gpoUnreadWhere[$dn] = (@($links[$dn] | ForEach-Object { if ($_ -ieq $domainDn) { 'domena' } else { $_ } }) | Sort-Object -Unique) -join '; '
+            continue
+        }
         if ([int]$gpo.flags -band 2) { continue }
         $isDom = @($links[$dn] | Where-Object { $_ -ieq $domainDn }).Count -gt 0
         $scope = (@($links[$dn] | ForEach-Object { if ($_ -ieq $domainDn) { 'domena' } else { ($_ -split '(?<!\\),')[0] -replace '^(OU|CN)=', '' } }) | Sort-Object -Unique) -join ', '
@@ -4493,12 +4498,18 @@ Add-IfAny @{
 }
 #endregion
 
-if ($gpoReadErrors.Count) {
+# GPO nieczytelne: podlinkowane do domeny i OU DC (testy konfiguracji DC) oraz do pozostałych OU i lokacji (testy GPO dla wszystkich komputerów)
+$gpoReadRows = @($gpoReadErrors.Keys | Sort-Object | ForEach-Object {
+    [pscustomobject]@{ Obiekt = $_; Podlinkowane = $(if ($gpoUnreadWhere.ContainsKey("$_".ToLower())) { $gpoUnreadWhere["$_".ToLower()] } else { 'domena lub OU Domain Controllers' }); Blad = $gpoReadErrors[$_] } })
+$gpoReadSeen = @($gpoReadErrors.Keys | ForEach-Object { "$_".ToLower() })
+$gpoReadRows += @($gpoUnreadWhere.Keys | Where-Object { $_ -notin $gpoReadSeen } | Sort-Object | ForEach-Object {
+    [pscustomobject]@{ Obiekt = $_; Podlinkowane = $gpoUnreadWhere[$_]; Blad = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu)' } })
+if ($gpoReadRows.Count) {
     Add-Finding @{
         Id = 'INFO-GPO-READ'; Category = 'Błędy testów'; Severity = 'Info'
-        Title = "Nie odczytano $($gpoReadErrors.Count) GPO lub plików GPO podpiętych do domeny i OU Domain Controllers"
-        Objects = @($gpoReadErrors.Keys | Sort-Object | ForEach-Object { [pscustomobject]@{ Obiekt = $_; Blad = $gpoReadErrors[$_] } })
-        Description = 'Konto przeglądu nie mogło odczytać tych GPO (obiektu w AD lub plików w SYSVOL). Ich ustawienia nie zostały uwzględnione w testach konfiguracji DC (LDAP, NTLM, CIS, Microsoft Security Baseline) - wyniki tych testów mogą być niepełne. Przyczyną bywa filtrowanie zabezpieczeń, z którego usunięto Authenticated Users bez nadania prawa odczytu Domain Computers - od poprawki MS16-072 takie GPO może w ogóle nie być stosowane na komputerach, także na DC.'
+        Title = "Nie odczytano $($gpoReadRows.Count) GPO lub plików GPO"
+        Objects = $gpoReadRows
+        Description = 'Konto przeglądu nie mogło odczytać tych GPO (obiektu w AD lub plików w SYSVOL). Ich ustawienia nie zostały uwzględnione w testach konfiguracji DC (LDAP, NTLM, CIS, Microsoft Security Baseline) ani w testach GPO dla wszystkich komputerów (LLMNR, rejestrowanie PowerShell) - wyniki tych testów mogą być niepełne, a reguły bez rozstrzygnięcia mają status Nierozstrzygnięty. Przyczyną bywa filtrowanie zabezpieczeń, z którego usunięto Authenticated Users bez nadania prawa odczytu Domain Computers - od poprawki MS16-072 takie GPO może w ogóle nie być stosowane na komputerach, także na DC.'
         Recommendation = 'Sprawdzić uprawnienia wskazanych GPO: Authenticated Users lub Domain Computers powinny mieć co najmniej odczyt (bez prawa stosowania, jeśli GPO ma dotyczyć tylko wybranej grupy). Usunąć łącza do nieistniejących GPO. Ustawienia z tych GPO zweryfikować przeglądem z -UseWinRM lub kontem, które je widzi.'
         Fix = (Fx 'Get-GPO -Guid <GUID z kolumny Obiekt> | Select-Object DisplayName, GpoStatus   # moduł GroupPolicy',
                   'Get-GPPermission -Guid <GUID> -All | Format-Table Trustee, Permission',
@@ -4897,7 +4908,7 @@ $covParts = @()
 if ($covWinRM) { $covParts += "$covWinRM wymaga -UseWinRM" }
 if ($covSkip)  { $covParts += "$covSkip pominięto" }
 if ($covErr)   { $covParts += "$covErr z błędem testu" }
-if ($covUnres) { $covParts += "$covUnres nierozstrzygnięto (brak łączności)" }
+if ($covUnres) { $covParts += "$covUnres nierozstrzygnięto (brak łączności lub dostępu)" }
 $covText = "<b>Zakres oceny:</b> ocenione reguły $covDone z $covTotal ($([Math]::Round(100 * $covDone / [Math]::Max($covTotal, 1)))%)$(if ($covCond) { ", w tym $covCond zaliczonych warunkowo (zakres GPO do potwierdzenia)" })"
 if ($covParts.Count) { $covText += "; nieocenione: $($covParts -join ', ') - wynik obszarów, których dotyczą, może być zaniżony (szczegóły: <a href=`"#reguly`">Sprawdzone reguły</a>)." } else { $covText += '.' }
 [void]$sb.Append("<p class=`"note`">$covText</p>")
