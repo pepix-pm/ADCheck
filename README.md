@@ -279,7 +279,7 @@ Wersja i data końca wsparcia ustalane są z atrybutów `operatingSystem` i `ope
 Invoke-Pester .\tests
 ```
 
-Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezależnych od AD i ich nie uruchamiają. Przy każdym pushu i pull requeście GitHub Actions (`.github/workflows/ci.yml`, Windows) uruchamia PSScriptAnalyzer (Warning, Error), testy Pester oraz sprawdza kodowanie UTF-8 z BOM plików `*.ps1`.
+Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezależnych od AD i ich nie uruchamiają. Przy każdym pushu i pull requeście GitHub Actions (`.github/workflows/ci.yml`, Windows) uruchamia PSScriptAnalyzer (Warning, Error; wyłączone reguły z uzasadnieniem w `PSScriptAnalyzerSettings.psd1`), testy Pester oraz sprawdza kodowanie UTF-8 z BOM plików `*.ps1`.
 
 ## Ograniczenia
 

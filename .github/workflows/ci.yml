@@ -38,7 +38,7 @@ jobs:
 
       - name: PSScriptAnalyzer
         run: |
-          $r = Invoke-ScriptAnalyzer -Path .\ADCheck.ps1 -Severity Warning, Error
+          $r = Invoke-ScriptAnalyzer -Path .\ADCheck.ps1 -Settings .\PSScriptAnalyzerSettings.psd1 -Severity Warning, Error
           $r | Format-Table RuleName, Severity, Line, Message -AutoSize -Wrap | Out-String -Width 200 | Write-Host
           if ($r) { exit 1 }
 
