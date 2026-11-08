@@ -20,7 +20,7 @@ jobs:
       run:
         shell: ${{ matrix.shell }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Kodowanie UTF-8 z BOM (*.ps1)
         run: |
