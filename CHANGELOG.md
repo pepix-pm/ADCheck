@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.30 – 2026-11-09
+
+- **`-History`**: sekcja „Historia przeglądów” w raporcie HTML – wykres wyniku ogólnego i obszarów oraz zgodności DC (CIS L1, Microsoft Security Baseline) w kolejnych przeglądach i tabela przeglądów. Dane z plików JSON w katalogu `-OutDir` – tylko ten sam klient i domena; pliki uszkodzone lub z niezgodną główną wersją schematu są pomijane (komunikat na konsoli i w raporcie). Przeglądy w innym trybie niż bieżący (testy DC, konto LDAP) mają pusty znacznik. Wykres SVG wpisany w raport, bez bibliotek zewnętrznych. Zgodność DC dla raportów sprzed 0.30 odczytywana z tytułu DC-CIS-SUMMARY.
+- `-Client`: alias parametru `-Klient` (wszystkie pozostałe parametry są po angielsku); dokumentacja używa `-Client`, `-Klient` działa nadal.
+- JSON (`SchemaVersion` 1.2): nowe pole `Meta.ZgodnoscDC` (`CIS`, `MS` w %, `CISOcenione`, `MSOcenione`); brak przy `-SkipDCChecks`.
+
 ## 0.29 – 2026-11-09
 
 - **DC-CIS-RIGHTS**: opis podaje, że przypisania praw odczytano z GPO, także przy `-UseWinRM`. Wcześniej w tym trybie opis mówił o odczycie z rejestru i auditpol, a ostrzeżenie o GPO bez folderu w SYSVOL było pomijane, choć nadal dotyczy tej reguły. DC-CIS-SUMMARY przy `-UseWinRM` opisuje oba źródła.

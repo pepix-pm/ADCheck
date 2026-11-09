@@ -25,7 +25,7 @@ Polecenie uruchamiające ADCheck (wydanie v0.29, z katalogu `C:\Lab`; wszystkie 
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/ADCheck/v0.29/ADCheck.ps1).TrimStart([char]0xFEFF))) -Klient LAB
 ```
 
-Do kolejnych przebiegów dopisuj parametry na końcu (np. `-Previous <plik.json>`). Raporty trafiają do katalogu `raporty` w bieżącym katalogu.
+Do kolejnych przebiegów dopisuj parametry na końcu (np. `-Previous <plik.json>`). Przy uruchomieniu z GitHuba raporty trafiają do `%USERPROFILE%\ADCheck\raporty` (np. `C:\Users\Administrator\ADCheck\raporty`).
 
 ## 2. Przebiegi
 

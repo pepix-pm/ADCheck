@@ -11,15 +11,18 @@
       - podpisywanie LDAP, channel binding, poziom NTLM: odczyt GPO z SYSVOL (GptTmpl.inf).
     -UseWinRM: zamiast GPO i sond odczyt rzeczywistych wartości z rejestru DC (wymaga admina na DC).
     -Silent: bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików.
+    -History: sekcja "Historia przeglądów" z wykresem wyników i zgodności DC z raportów JSON tego klienta i domeny w katalogu -OutDir.
+    -Client: alias -Klient.
     Wynik: szczegółowy raport HTML, JSON (do porównań), CSV znalezisk i CSV obiektów.
     Punkty: Critical=25, High=10, Medium=3, Low=1 za znalezisko; wynik 0-100 w czterech obszarach ryzyka,
     wynik ogólny = najgorszy obszar, klasa ekspozycji A-E; im mniej punktów, tym lepiej.
 
 .EXAMPLE
-    .\ADCheck.ps1 -Klient KLIENT
-    .\ADCheck.ps1 -Klient KLIENT -Server firma.local -UseWinRM
-    .\ADCheck.ps1 -Klient KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
-    .\ADCheck.ps1 -Klient KLIENT -Silent   # bez komunikatów w konsoli; zwraca obiekt ze ścieżkami raportu i wynikiem
+    .\ADCheck.ps1 -Client KLIENT
+    .\ADCheck.ps1 -Client KLIENT -Server firma.local -UseWinRM
+    .\ADCheck.ps1 -Client KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
+    .\ADCheck.ps1 -Client KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json -History   # z wykresem wcześniejszych przeglądów z katalogu raporty
+    .\ADCheck.ps1 -Client KLIENT -Silent   # bez komunikatów w konsoli; zwraca obiekt ze ścieżkami raportu i wynikiem
     # bez kopiowania pliku na serwer (z wydania na GitHubie, z weryfikacją SHA256) - patrz README, sekcja "Uruchomienie z GitHuba"
 
 .NOTES
@@ -30,7 +33,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Klient,
+    [Parameter(Mandatory)][Alias('Client')][string]$Klient,
     [string]$Server = $env:USERDNSDOMAIN,
     [string]$OutDir,
     [int]$StaleDays = 90,
@@ -38,12 +41,13 @@ param(
     [switch]$UseWinRM,
     [switch]$SkipDCChecks,
     [int]$MaxRows = 500,
-    [switch]$Silent
+    [switch]$Silent,
+    [switch]$History
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.29'
-$jsonSchemaVersion = '1.1'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
+$Version = '0.30'
+$jsonSchemaVersion = '1.2'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
@@ -3756,6 +3760,7 @@ if (-not $SkipDCChecks) {
 #endregion
 
 #region ---------- konfiguracja DC wg CIS (profil L1, kontroler domeny) ----------
+$dcCompliance = [ordered]@{}   # zgodność DC w % (CIS, MS) do Meta.ZgodnoscDC i historii przeglądów
 # Wybrane kontrole CIS Microsoft Windows Server Benchmark L1 (DC), których nie obejmują inne testy (LDAP signing, NTLM, SMBv1, Spooler są w DC-*).
 # Zwykłe konto: konfiguracja zamierzona z GPO (GptTmpl.inf, Registry.pol, audit.csv). -UseWinRM: rzeczywisty rejestr i auditpol każdego DC.
 # Przypisanie praw użytkowników zawsze z GPO (odczyt rzeczywisty wymagałby secedit /export, czyli zapisu pliku na DC).
@@ -4067,6 +4072,8 @@ if (-not $SkipDCChecks) {
         $msEval    = @($cisRows | Where-Object { $_.ZgodneMS -in 'Tak', 'Nie' })
         $msOk      = @($msEval | Where-Object ZgodneMS -eq 'Tak').Count
         $msPct     = if ($msEval.Count) { [int](100 * $msOk / $msEval.Count) } else { 0 }
+        $dcCompliance.CIS = $(if ($evaluated.Count) { $pct } else { $null }); $dcCompliance.CISOcenione = $evaluated.Count
+        $dcCompliance.MS  = $(if ($msEval.Count) { $msPct } else { $null }); $dcCompliance.MSOcenione = $msEval.Count
         Add-Finding @{
             Id = 'DC-CIS-SUMMARY'; Category = $catCis; Severity = 'Info'
             Title = "Zgodność DC: CIS L1 $okCount z $($evaluated.Count) ($pct%), Microsoft Security Baseline $msOk z $($msEval.Count) ($msPct%)$(if ($cisRows.Count -gt $evaluated.Count) { "; poza oceną CIS: $($cisRows.Count - $evaluated.Count)" })"
@@ -4748,6 +4755,104 @@ $meta = [ordered]@{
     Stacja    = $env:COMPUTERNAME
     TestyDC   = $dcMethod
     KontoUprzywilejowane = $runAsPriv
+    ZgodnoscDC = $(if ($dcCompliance.Count) { $dcCompliance } else { $null })
+}
+
+# ---------- historia przeglądów (-History) ----------
+# Punkt historii z raportu (obiekt z JSON albo bieżący przebieg: Meta + Znaleziska). Zgodność DC: Meta.ZgodnoscDC (od 0.30),
+# w starszych raportach z tytułu DC-CIS-SUMMARY.
+function ConvertTo-HistoryPoint($Report) {
+    $m = $Report.Meta
+    $areas = [ordered]@{}
+    if ($m.Obszary -is [System.Collections.IDictionary]) { foreach ($k in $m.Obszary.Keys) { $areas["$k"] = [int]$m.Obszary[$k] } }
+    elseif ($m.Obszary) { foreach ($p in $m.Obszary.PSObject.Properties) { $areas[$p.Name] = [int]$p.Value } }
+    $cis = $null; $ms = $null
+    if ($m.ZgodnoscDC) { $cis = $m.ZgodnoscDC.CIS; $ms = $m.ZgodnoscDC.MS }
+    else {
+        $t = "$(@($Report.Znaleziska | Where-Object Id -eq 'DC-CIS-SUMMARY' | Select-Object -First 1).Title)"
+        if ($t -match 'CIS L1 (\d+) z (\d+) \((\d+)%\)') { if ([int]$Matches[2]) { $cis = [int]$Matches[3] } }
+        if ($t -match 'Microsoft Security Baseline (\d+) z (\d+) \((\d+)%\)') { if ([int]$Matches[2]) { $ms = [int]$Matches[3] } }
+    }
+    $cnt = @{}
+    foreach ($s in 'Critical', 'High', 'Medium', 'Low') { $cnt[$s] = @($Report.Znaleziska | Where-Object Severity -eq $s).Count }
+    $date = if ($m.Data -is [datetime]) { $m.Data } else { [datetime]::Parse("$($m.Data)", [System.Globalization.CultureInfo]::InvariantCulture) }
+    [pscustomobject]@{
+        Data = $date; Wersja = "$($m.Wersja)"; TestyDC = "$($m.TestyDC)"; KontoLdap = "$($m.KontoLdap)"
+        KontoUprzywilejowane = $(if ($m.PSObject.Properties.Name -contains 'KontoUprzywilejowane' -or ($m -is [System.Collections.IDictionary] -and $m.Contains('KontoUprzywilejowane'))) { [bool]$m.KontoUprzywilejowane } else { $null })
+        Wynik = [int]$m.Wynik; Klasa = "$($m.KlasaEkspozycji)"; Obszary = $areas
+        Critical = $cnt.Critical; High = $cnt.High; Medium = $cnt.Medium; Low = $cnt.Low; CIS = $cis; MS = $ms; Biezacy = $false
+    }
+}
+
+# Liczba w SVG zawsze z kropką dziesiętną (polska kultura dałaby przecinek)
+function Format-SvgNum([double]$N) { $N.ToString('0.#', [System.Globalization.CultureInfo]::InvariantCulture) }
+
+# Wykres liniowy 0-100 jako SVG wpisany w raport (bez bibliotek zewnętrznych - raport działa offline).
+# $Series: @{ Name; Color; Values (int lub $null); Width; Opacity; NoMarkers }; $Hollow[i] = punkt i jako pusty znacznik (inny tryb przeglądu).
+function ConvertTo-TrendSvg([string[]]$Labels, [object[]]$Series, [bool[]]$Hollow, [string]$Unit = '') {
+    $w = 760; $h = 250; $l = 44; $r = 44; $t = 12; $b = 44
+    $n = $Labels.Count
+    $pw = $w - $l - $r; $ph = $h - $t - $b
+    $x = { param($i) if ($n -le 1) { $l + $pw / 2 } else { $l + $pw * $i / ($n - 1) } }
+    $y = { param($v) $t + $ph * (1 - [Math]::Min(100, [Math]::Max(0, $v)) / 100) }
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append("<svg class=`"trend`" viewBox=`"0 0 $w $h`" role=`"img`" xmlns=`"http://www.w3.org/2000/svg`">")
+    foreach ($g in 0, 25, 50, 75, 100) {
+        $gy = Format-SvgNum (& $y $g)
+        [void]$sb.Append("<line x1=`"$l`" x2=`"$($w - $r)`" y1=`"$gy`" y2=`"$gy`" class=`"grid`"/><text x=`"$($l - 6)`" y=`"$gy`" class=`"ax`" text-anchor=`"end`" dominant-baseline=`"middle`">$g$Unit</text>")
+    }
+    $step = [Math]::Max(1, [Math]::Ceiling($n / 8))
+    for ($i = 0; $i -lt $n; $i++) {
+        if (($i % $step) -and $i -ne $n - 1) { continue }
+        [void]$sb.Append("<text x=`"$(Format-SvgNum (& $x $i))`" y=`"$($h - $b + 18)`" class=`"ax`" text-anchor=`"middle`">$([System.Net.WebUtility]::HtmlEncode($Labels[$i]))</text>")
+    }
+    foreach ($se in $Series) {
+        $vals = @($se.Values)
+        $wd = if ($se.Width) { $se.Width } else { 2 }
+        $op = if ($se.Opacity) { " stroke-opacity=`"$(Format-SvgNum $se.Opacity)`" stroke-linejoin=`"round`" stroke-linecap=`"round`"" } else { '' }
+        # linia przerywana tam, gdzie brak wartości (np. przegląd bez testów DC)
+        $seg = [System.Collections.Generic.List[string]]::new()
+        $flush = { if ($seg.Count -gt 1) { [void]$sb.Append("<polyline fill=`"none`" stroke=`"$($se.Color)`" stroke-width=`"$(Format-SvgNum $wd)`"$op points=`"$($seg -join ' ')`"/>") }; $seg.Clear() }
+        for ($i = 0; $i -lt $n; $i++) {
+            if ($null -eq $vals[$i]) { & $flush; continue }
+            $seg.Add("$(Format-SvgNum (& $x $i)),$(Format-SvgNum (& $y $vals[$i]))")
+        }
+        & $flush
+        for ($i = 0; $i -lt $n; $i++) {
+            if ($null -eq $vals[$i] -or $se.NoMarkers) { continue }
+            $fill = if ($Hollow -and $Hollow[$i]) { '#fff' } else { $se.Color }
+            $tip = [System.Net.WebUtility]::HtmlEncode("$($se.Name): $($vals[$i])$Unit ($($Labels[$i]))")
+            [void]$sb.Append("<circle cx=`"$(Format-SvgNum (& $x $i))`" cy=`"$(Format-SvgNum (& $y $vals[$i]))`" r=`"4`" fill=`"$fill`" stroke=`"$($se.Color)`" stroke-width=`"2`"><title>$tip</title></circle>")
+        }
+    }
+    [void]$sb.Append('</svg>')
+    $sb.ToString()
+}
+
+# Wcześniejsze raporty tego klienta i domeny z katalogu wyników + bieżący przebieg; pliki niezgodne lub uszkodzone są pomijane
+$historyPoints = @()
+$historySkipped = 0
+if ($History) {
+    $curFile = 'AD_{0}_{1}_{2:yyyyMMdd-HHmm}.json' -f $Klient, $domain.DNSRoot, $now
+    $hist = [System.Collections.Generic.List[object]]::new()
+    if (Test-Path -LiteralPath $OutDir) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $OutDir -Filter "AD_*_$($domain.DNSRoot)_*.json" -File -ErrorAction SilentlyContinue)) {
+            if ($f.Name -eq $curFile) { continue }
+            try {
+                $j = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+                $sv = if ($j.SchemaVersion) { "$($j.SchemaVersion)" } else { '1.0' }
+                if (-not $j.Meta -or $sv.Split('.')[0] -ne $jsonSchemaVersion.Split('.')[0]) { $historySkipped++; continue }
+                # tylko ten sam klient i domena - raporty innych klientów w tym samym katalogu nie mogą trafić do raportu
+                if ("$($j.Meta.Klient)" -ne $Klient -or "$($j.Meta.Domena)" -ne $domain.DNSRoot) { continue }
+                $hist.Add((ConvertTo-HistoryPoint $j))
+            } catch { $historySkipped++ }
+        }
+    }
+    $cur = ConvertTo-HistoryPoint ([pscustomobject]@{ Meta = $meta; Znaleziska = $sorted })
+    $cur.Biezacy = $true
+    $hist.Add($cur)
+    $historyPoints = @($hist | Sort-Object Data)
+    Write-Step "  -History: przeglądy w historii: $($historyPoints.Count)$(if ($historySkipped) { ", pominięte pliki (niezgodne lub uszkodzone): $historySkipped" })" $(if ($historySkipped) { 'Yellow' } else { 'Green' })
 }
 
 $invDomain = @(
@@ -4890,6 +4995,8 @@ pre{background:#1E2430;color:#E6E9EF;padding:10px 12px;border-radius:6px;overflo
 .cp{position:absolute;top:6px;right:6px;padding:3px 10px;font-size:11px;background:#2D3748;color:#E6E9EF;border:1px solid #4A5568;border-radius:5px}
 .cp:hover{background:var(--pbd);border-color:var(--pbd)}.cp.ok{background:var(--l);border-color:var(--l)}
 .note{color:var(--muted);font-size:12px}
+.trend{width:100%;height:auto;max-width:900px;display:block;margin:4px 0 12px}.trend .grid{stroke:var(--line);stroke-width:1}.trend .ax{fill:var(--muted);font-size:10px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;margin:6px 0}.lg i{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:6px}
 a{color:var(--pbd)}
 button{background:var(--pbd);color:#fff;border:0;padding:6px 12px;border-radius:6px;cursor:pointer}
 button:hover{background:var(--pb)}
@@ -5001,6 +5108,50 @@ if ($diff) {
         [void]$sb.Append("<p><b>Nowe znaleziska Critical:</b> $(HtmlEnc ($diff.NoweCritical -join ', '))</p>")
     }
     [void]$sb.Append("<p><b>Nowe znaleziska:</b> $(HtmlEnc (($diff.Nowe) -join ', '))</p><p><b>Usunięte (naprawione):</b> $(HtmlEnc (($diff.Usuniete) -join ', '))</p></section>")
+}
+
+if ($History) {
+    [void]$sb.Append('<section id="historia"><h2>Historia przeglądów</h2>')
+    if ($historyPoints.Count -lt 2) {
+        [void]$sb.Append("<p class=`"note`">Brak wcześniejszych raportów JSON tego klienta i domeny w katalogu wyników ($(HtmlEnc $OutDir)) - historia zacznie się od tego przeglądu.</p>")
+    } else {
+        $hp = $historyPoints
+        $fmt = if (@($hp | Group-Object { $_.Data.ToString('yyyy-MM-dd') } | Where-Object Count -gt 1).Count) { 'yyyy-MM-dd HH:mm' } else { 'yyyy-MM-dd' }
+        $labels = @($hp | ForEach-Object { $_.Data.ToString($fmt) })
+        $cur = @($hp | Where-Object Biezacy)[0]
+        # inny tryb niż bieżący przegląd: inne źródło testów DC albo inne konto - pusty znacznik
+        $hollow = [bool[]]@($hp | ForEach-Object { ($_.TestyDC -and $_.TestyDC -ne $cur.TestyDC) -or ($_.KontoLdap -and $_.KontoLdap -ne 'nieustalone' -and $cur.KontoLdap -ne 'nieustalone' -and $_.KontoLdap -ne $cur.KontoLdap) })
+        $palette = '#4299E1', '#F59F00', '#15803D', '#9333EA', '#DB2777'
+        $series = [System.Collections.Generic.List[object]]::new()
+        # wynik ogólny = najgorszy obszar, więc pokrywa się z jedną z linii obszarów - rysowany jako szerokie pasmo pod nimi
+        $series.Add(@{ Name = 'Wynik ogólny (najgorszy obszar)'; Color = '#1A202C'; Width = 9; Opacity = 0.18; NoMarkers = $true; Values = @($hp | ForEach-Object { $_.Wynik }) })
+        $ai = 0
+        foreach ($a in $areaScore.Keys) {
+            $series.Add(@{ Name = "$a"; Color = $palette[$ai % $palette.Count]; Width = 1.5; Values = @($hp | ForEach-Object { if ($_.Obszary.Contains("$a")) { $_.Obszary["$a"] } else { $null } }) })
+            $ai++
+        }
+        $legend = { param($S) ($S | ForEach-Object { "<span class=`"lg`"><i style=`"background:$($_.Color)$(if ($_.Opacity) { ';opacity:.3;height:8px' })`"></i>$(HtmlEnc $_.Name)</span>" }) -join '' }
+        [void]$sb.Append("<p class=`"note`">Punkty w kolejnych przeglądach (0-100, im mniej, tym lepiej). Pusty znacznik: przegląd w innym trybie niż bieżący (inne źródło testów DC lub inne konto) - różnice mogą wynikać z trybu, a nie ze zmian w AD. Wartość punktu po najechaniu kursorem.</p>")
+        [void]$sb.Append("<div class=`"legend`">$(& $legend $series)</div>$(ConvertTo-TrendSvg $labels $series $hollow)")
+        if (@($hp | Where-Object { $null -ne $_.CIS -or $null -ne $_.MS }).Count) {
+            $dcSeries = @(
+                @{ Name = 'CIS L1'; Color = '#2B6CB0'; Width = 2.5; Values = @($hp | ForEach-Object { $_.CIS }) }
+                @{ Name = 'Microsoft Security Baseline'; Color = '#F59F00'; Width = 2.5; Values = @($hp | ForEach-Object { $_.MS }) }
+            )
+            [void]$sb.Append("<h3>Zgodność konfiguracji DC</h3><p class=`"note`">Odsetek zgodnych ustawień (im więcej, tym lepiej). Przegląd bez -UseWinRM ocenia GPO (konfigurację zamierzoną), z -UseWinRM - rzeczywisty stan DC; zakres sprawdzanych ustawień mógł się zmieniać między wersjami ADCheck.</p>")
+            [void]$sb.Append("<div class=`"legend`">$(& $legend $dcSeries)</div>$(ConvertTo-TrendSvg $labels $dcSeries $hollow '%')")
+        }
+        [void]$sb.Append('<table><tr><th>Data</th><th>ADCheck</th><th>Testy DC / konto</th><th>Wynik</th><th>Klasa</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>CIS L1</th><th>MS Baseline</th></tr>')
+        for ($i = $hp.Count - 1; $i -ge 0; $i--) {
+            $q = $hp[$i]
+            $pctTxt = { param($v) if ($null -eq $v) { '–' } else { "$v%" } }
+            [void]$sb.Append("<tr><td>$(HtmlEnc $q.Data.ToString('yyyy-MM-dd HH:mm'))$(if ($q.Biezacy) { ' <b>(bieżący)</b>' })</td><td>$(HtmlEnc $q.Wersja)</td><td>$(HtmlEnc "$($q.TestyDC); $($q.KontoLdap)")$(if ($hollow[$i]) { ' <b>(inny tryb)</b>' })</td>")
+            [void]$sb.Append("<td>$($q.Wynik)</td><td>$(HtmlEnc $q.Klasa)</td><td>$($q.Critical)</td><td>$($q.High)</td><td>$($q.Medium)</td><td>$($q.Low)</td><td>$(& $pctTxt $q.CIS)</td><td>$(& $pctTxt $q.MS)</td></tr>")
+        }
+        [void]$sb.Append('</table>')
+        if ($historySkipped) { [void]$sb.Append("<p class=`"note`">Pominięto $historySkipped plików JSON (uszkodzone lub z niezgodną wersją schematu).</p>") }
+    }
+    [void]$sb.Append('</section>')
 }
 
 [void]$sb.Append('<section id="macierz"><h2>Macierz ryzyka</h2><p class="note">Punkty znalezisk w podziale na obszary i rodzaje ryzyka. Zielone - brak problemów, żółte 1-9 pkt, pomarańczowe 10-29 pkt, czerwone 30+ pkt. Kliknięcie pola ze znaleziskami pokazuje linki do ich szczegółów.</p><div class="matrix">')

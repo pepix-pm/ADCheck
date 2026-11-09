@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Format-SvgNum', 'ConvertTo-TrendSvg'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -320,4 +320,41 @@ Describe 'Get-ReplicationRights' {
 Describe 'Get-OsLifecycle - daty szacunkowe' {
     It '26H2 ma datę oznaczoną jako szacunek' { (Get-OsLifecycle 'Windows 11 Pro' '10.0 (26300)').Szacunek | Should -BeTrue }
     It '25H2 ma datę potwierdzoną' { (Get-OsLifecycle 'Windows 11 Pro' '10.0 (26200)').Szacunek | Should -BeFalse }
+}
+
+Describe 'Historia przeglądów' {
+    It 'punkt z raportu sprzed 0.30: zgodność DC z tytułu DC-CIS-SUMMARY, liczba znalezisk wg wagi' {
+        $j = '{"Meta":{"Data":"2026-01-10T10:00:00","Wynik":60,"Obszary":{"Anomalie":20,"Konta uprzywilejowane":60},"KlasaEkspozycji":"D","Wersja":"0.28"},"Znaleziska":[{"Id":"P-PNE","Severity":"High"},{"Id":"U-STALE","Severity":"Medium"},{"Id":"DC-CIS-SUMMARY","Severity":"Info","Title":"Zgodność DC: CIS L1 40 z 60 (66%), Microsoft Security Baseline 0 z 0 (0%)"}]}' | ConvertFrom-Json
+        $p = ConvertTo-HistoryPoint $j
+        $p.Wynik | Should -Be 60
+        $p.Obszary['Anomalie'] | Should -Be 20
+        $p.High | Should -Be 1
+        $p.Medium | Should -Be 1
+        $p.CIS | Should -Be 66
+        $p.MS | Should -BeNullOrEmpty   # 0 ocenionych ustawień - brak wartości, nie 0%
+        $p.KontoUprzywilejowane | Should -BeNullOrEmpty
+    }
+    It 'punkt z bieżącego przebiegu (słowniki uporządkowane)' {
+        $meta = [ordered]@{ Data = '2026-02-01T09:30:00'; Wynik = 25; Obszary = [ordered]@{ Anomalie = 25 }; KlasaEkspozycji = 'E'; KontoUprzywilejowane = $false; ZgodnoscDC = [ordered]@{ CIS = 81; MS = 70 } }
+        $p = ConvertTo-HistoryPoint ([pscustomobject]@{ Meta = $meta; Znaleziska = @([pscustomobject]@{ Id = 'D-DCSYNC'; Severity = 'Critical' }) })
+        $p.Data | Should -Be ([datetime]'2026-02-01T09:30:00')
+        $p.Critical | Should -Be 1
+        $p.CIS | Should -Be 81
+        $p.KontoUprzywilejowane | Should -BeFalse
+    }
+    It 'liczby w SVG z kropką dziesiętną niezależnie od kultury' {
+        $c = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = 'pl-PL'
+            Format-SvgNum 157.5 | Should -Be '157.5'
+            $svg = ConvertTo-TrendSvg @('a', 'b', 'c') @(@{ Name = 'X'; Color = '#000'; Values = @(10, $null, 33) }) @($false, $true, $false)
+            $svg | Should -Not -Match 'points="[^"]*\d,\d+ \d'
+        } finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $c }
+    }
+    It 'brak wartości przerywa linię; pusty znacznik dla innego trybu' {
+        $svg = ConvertTo-TrendSvg @('a', 'b', 'c') @(@{ Name = 'X'; Color = '#000'; Values = @(10, 20, $null) }) @($false, $true, $false)
+        ([regex]::Matches($svg, '<polyline')).Count | Should -Be 1
+        ([regex]::Matches($svg, '<circle')).Count | Should -Be 2
+        $svg | Should -Match 'fill="#fff"'
+    }
 }

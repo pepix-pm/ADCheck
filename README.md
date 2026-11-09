@@ -17,18 +17,19 @@ Skrypt sprawdza wymagania na starcie i wypisuje wszystkie braki naraz.
 
 ```powershell
 clear
-.\ADCheck.ps1 -Klient KLIENT
-.\ADCheck.ps1 -Klient KLIENT -Server firma.local -UseWinRM
-.\ADCheck.ps1 -Klient KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
+.\ADCheck.ps1 -Client KLIENT
+.\ADCheck.ps1 -Client KLIENT -Server firma.local -UseWinRM
+.\ADCheck.ps1 -Client KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json -History
 ```
 
 | Parametr | Opis |
 |---|---|
-| `-Klient` | Nazwa organizacji w raporcie i w nazwie pliku (wymagany) |
+| `-Client` | Nazwa organizacji w raporcie i w nazwie pliku (wymagany). Do v0.29 tylko `-Klient` – ta nazwa nadal działa |
 | `-Server` | Domena lub DC do odpytania (domyślnie domena bieżącego użytkownika) |
 | `-OutDir` | Katalog wyników (domyślnie `.\raporty` obok skryptu; przy uruchomieniu z GitHuba `%USERPROFILE%\ADCheck\raporty`) |
 | `-StaleDays` | Próg nieaktywności kont w dniach (domyślnie 90) |
 | `-Previous` | JSON z poprzedniego przeglądu do porównania |
+| `-History` | Sekcja „Historia przeglądów”: wykres wyników i zgodności DC ze wszystkich raportów JSON tego klienta i domeny w katalogu `-OutDir` (od v0.30) |
 | `-UseWinRM` | Testy DC z rejestru przez WinRM (wymaga admina na DC) |
 | `-SkipDCChecks` | Pomija testy kontrolerów domeny |
 | `-MaxRows` | Maksymalna liczba obiektów na znalezisko w HTML (domyślnie 500; pełna lista w CSV) |
@@ -47,7 +48,7 @@ Skrypt nie wymaga RSAT ani uprawnień administratora na stacji – wystarczy zwy
    ```powershell
    runas /netonly /user:FIRMA\uzytkownik powershell.exe
    ```
-3. W nowym oknie podaj domenę jawnie: `& $adcheck -Klient KLIENT -Server firma.local`.
+3. W nowym oknie podaj domenę jawnie: `& $adcheck -Client KLIENT -Server firma.local`.
 
 Raport pokazuje wtedy osobno konto procesu („Uruchomił”) i konto, którym skrypt uwierzytelnił się do LDAP („Konto LDAP”, ustalane zapytaniem LDAP *Who am I*). Ocena, czy przegląd wykonano kontem uprzywilejowanym, dotyczy konta LDAP.
 
@@ -67,7 +68,7 @@ $v='v0.28'; $h='76B48ABB9F078F2B4563D8F14397EC648B19EA4584D9D25EB8FE94411D0400BC
 Gałąź `main` służy wyłącznie do rozwoju i testów w laboratorium. Wersja nieoznaczona tagiem (np. do testu przed wydaniem):
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/ADCheck/main/ADCheck.ps1).TrimStart([char]0xFEFF))) -Klient KLIENT
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/ADCheck/main/ADCheck.ps1).TrimStart([char]0xFEFF))) -Client KLIENT
 ```
 
 Sprawdzenie składni bez uruchamiania (np. po zmianach w repo):
@@ -77,7 +78,7 @@ $e=$null; [void][System.Management.Automation.Language.Parser]::ParseInput((irm 
 ```
 
 Uwagi:
-- Dlaczego nie `iex (irm ...)`: `iex` nie przyjmuje parametrów (`-Klient`, `-UseWinRM`…), a do tego wykonuje skrypt w bieżącej sesji – zostawia w niej zmienne skryptu i `$ErrorActionPreference = 'Stop'`. Scriptblock przyjmuje parametry i działa we własnym zakresie. Oba sposoby omijają ExecutionPolicy i nie zapisują skryptu na dysku.
+- Dlaczego nie `iex (irm ...)`: `iex` nie przyjmuje parametrów (`-Client`, `-UseWinRM`…), a do tego wykonuje skrypt w bieżącej sesji – zostawia w niej zmienne skryptu i `$ErrorActionPreference = 'Stop'`. Scriptblock przyjmuje parametry i działa we własnym zakresie. Oba sposoby omijają ExecutionPolicy i nie zapisują skryptu na dysku.
 - `.TrimStart([char]0xFEFF)` usuwa znacznik BOM (plik musi go mieć, żeby PowerShell 5.1 z pliku poprawnie czytał polskie znaki). GitHub wysyła `charset=utf-8`, więc `irm` dekoduje polskie znaki poprawnie.
 - Wydanie (tag) powstaje dopiero po przetestowaniu wersji w środowisku testowym i w co najmniej jednym środowisku produkcyjnym. Tagi i gałąź `main` są chronione przed nadpisaniem i usunięciem.
 - Raporty powstają w `%USERPROFILE%\ADCheck\raporty`. Jeśli przekazujesz je dalej, rób to szyfrowanym kanałem, a potem usuń je ze stacji.
@@ -99,6 +100,7 @@ W katalogu `raporty` powstają pliki `AD_<klient>_<domena>_<data>`:
 - Znaleziska należą do jednego z **czterech obszarów ryzyka**: obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie. Wynik obszaru = suma punktów, maks. 100. **Wynik ogólny = najgorszy obszar** (0–100, im mniej, tym lepiej). Gdy suma przekracza 100, raport podaje też pełną sumę (np. 4 i 10 znalezisk Critical dają ten sam wynik 100, ale inną sumę); porównanie z `-Previous` pokazuje wtedy zmianę sumy. Karta zmiany podaje też zmianę klasy ekspozycji i liczbę nowych znalezisk Critical (wynik może spaść mimo nowego Critical, jeśli najgorszy jest inny obszar), a sekcja porównania ostrzega, gdy poprzedni przegląd wykonano w innym trybie (testy DC, konto przeglądu, uprawnienia konta).
 - **Klasa ekspozycji A–E** wynika z najpoważniejszego znaleziska (Critical = E, High = D, Medium = C, Low = B, brak = A). Opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa organizacji.
 - **Macierz ryzyka** pokazuje punkty w podziale obszar × rodzaj ryzyka (np. „Łamanie haseł”, „Pass-the-hash”, „Replikacja i kondycja”).
+- **Historia przeglądów** (`-History`) – wykres wyniku ogólnego i obszarów oraz zgodności DC z CIS L1 i Microsoft Security Baseline w kolejnych przeglądach, z tabelą (data, wersja, tryb, wynik, klasa, liczba znalezisk wg wagi). Źródłem są pliki JSON z katalogu wyników, wyłącznie z tą samą nazwą klienta i domeną; pliki z niezgodną główną wersją `SchemaVersion` są pomijane. Przeglądy w innym trybie niż bieżący (inne źródło testów DC lub inne konto) mają pusty znacznik – zmiana może wynikać z trybu, a nie ze zmian w AD. Wykres jest wpisany w raport (SVG), bez zewnętrznych bibliotek.
 - Nazwy kont i grup w tabelach (np. „BUILTIN\Administratorzy” obok „FIRMA\Domain Admins”) zależą od języka systemu stacji, z której uruchomiono przegląd. Ocena opiera się na SID, więc wynik nie zależy od języka.
 - **Sprawdzone reguły** – status każdego testu: znalezisko, zaliczony, zaliczony warunkowo (np. ustawienie tylko w GPO podlinkowanym do OU – zakres do potwierdzenia), nie dotyczy, pominięty, wymaga `-UseWinRM`, błąd testu, nierozstrzygnięty.
 
