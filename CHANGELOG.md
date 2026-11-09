@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.29 – 2026-11-09
+
+- **DC-CIS-RIGHTS**: opis podaje, że przypisania praw odczytano z GPO, także przy `-UseWinRM`. Wcześniej w tym trybie opis mówił o odczycie z rejestru i auditpol, a ostrzeżenie o GPO bez folderu w SYSVOL było pomijane, choć nadal dotyczy tej reguły. DC-CIS-SUMMARY przy `-UseWinRM` opisuje oba źródła.
+- **D-DCSYNC**: kolumna Uwagi podaje prawa replikacji, które podmiot ma tylko przez grupy (np. „Get-Changes przez FIRMA\grupa”). Waga nie zależy już od treści kolumny Uwagi.
+- **D-GPO-DEADLINK** (Low, nowa reguła): łącza gPLink domeny, OU lub lokacji do GPO, którego obiektu nie ma w AD. Łącze do usuniętego GPO podlinkowane do domeny lub OU Domain Controllers nie trafia już do INFO-GPO-READ jako „GPO niewidoczne”.
+- `-Previous`: karta zmiany wyniku podaje zmianę klasy ekspozycji i liczbę nowych znalezisk Critical, a przy pogorszeniu klasy lub nowym Critical jest oznaczona na czerwono (wynik ogólny może spaść mimo nowego Critical). Sekcja porównania wymienia nowe znaleziska Critical i ostrzega – także na konsoli – gdy poprzedni przegląd wykonano w innym trybie (testy DC, konto LDAP, uprawnienia konta).
+- JSON (`SchemaVersion` 1.1): nowe pola `Meta.KontoUprzywilejowane`, `Porownanie.PoprzedniaKlasa`, `Porownanie.NoweCritical`, `Porownanie.RozneTryby`.
+- README: nazwy kont i grup w tabelach zależą od języka systemu stacji przeglądu (ocena po SID).
+
 ## 0.28 – 2026-11-08
 
 - INFO-GPO-READ: GPO w kolumnie Obiekt podawane jako {GUID} wielkimi literami (wcześniej DN w różnej wielkości liter); GPO, które istnieje, ale jest nieczytelne dla konta przeglądu, ma zawsze opis „brak prawa odczytu”. Lista obejmuje także GPO nieczytelne dla konta przeglądu podlinkowane do pozostałych OU i lokacji (przyczyna statusu „Nierozstrzygnięty” w D-GPO-LLMNR i D-GPO-PSLOG), z nową kolumną Podlinkowane. Zakres oceny opisuje reguły nierozstrzygnięte jako „brak łączności lub dostępu”.

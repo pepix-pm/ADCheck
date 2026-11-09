@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -260,6 +260,20 @@ Describe 'Get-DcSyncSet' {
     It 'sam In-Filtered-Set - niepełny' { Get-DcSyncSet $rights @('S-1-5-21-1-1-1-1004') | Should -BeLike 'niepełny (sam In-Filtered-Set)' }
     It 'Get-Changes + In-Filtered-Set - zestaw filtrowany' { Get-DcSyncSet $rights @('S-1-5-21-1-1-1-1002', 'S-1-5-21-1-1-1-1004') | Should -BeLike 'zestaw filtrowany*' }
     It 'brak praw - pusty' { Get-DcSyncSet $rights @('S-1-5-21-1-1-1-9999') | Should -Be '' }
+}
+
+Describe 'Get-DcSyncSource' {
+    BeforeAll {
+        function Resolve-SidName([string]$Sid) { "FIRMA\$Sid" }
+        $rights = @{
+            'S-1-5-21-1-1-1-1001' = @{ GetChanges = $false; GetChangesAll = $true;  Filtered = $false }
+            'S-1-5-21-1-1-1-1002' = @{ GetChanges = $true;  GetChangesAll = $false; Filtered = $false }
+            'S-1-5-21-1-1-1-1003' = @{ GetChanges = $true;  GetChangesAll = $true;  Filtered = $false }
+        }
+    }
+    It 'prawo tylko przez grupę' { Get-DcSyncSource $rights 'S-1-5-21-1-1-1-1001' @('S-1-5-21-1-1-1-1001', 'S-1-5-21-1-1-1-1002') | Should -Be 'Get-Changes przez FIRMA\S-1-5-21-1-1-1-1002' }
+    It 'prawa nadane bezpośrednio - pusto' { Get-DcSyncSource $rights 'S-1-5-21-1-1-1-1003' @('S-1-5-21-1-1-1-1003', 'S-1-5-21-1-1-1-1002') | Should -Be '' }
+    It 'kilka praw przez grupy' { Get-DcSyncSource $rights 'S-1-5-21-1-1-1-9999' @('S-1-5-21-1-1-1-9999', 'S-1-5-21-1-1-1-1001', 'S-1-5-21-1-1-1-1002') | Should -Be 'Get-Changes przez FIRMA\S-1-5-21-1-1-1-1002; Get-Changes-All przez FIRMA\S-1-5-21-1-1-1-1001' }
 }
 
 Describe 'Get-ReplicationRights' {

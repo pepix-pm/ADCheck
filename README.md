@@ -96,9 +96,10 @@ W katalogu `raporty` powstają pliki `AD_<klient>_<domena>_<data>`:
 ### Punktacja i struktura raportu
 
 - Każde znalezisko: Critical = 25, High = 10, Medium = 3, Low = 1 pkt.
-- Znaleziska należą do jednego z **czterech obszarów ryzyka**: obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie. Wynik obszaru = suma punktów, maks. 100. **Wynik ogólny = najgorszy obszar** (0–100, im mniej, tym lepiej). Gdy suma przekracza 100, raport podaje też pełną sumę (np. 4 i 10 znalezisk Critical dają ten sam wynik 100, ale inną sumę); porównanie z `-Previous` pokazuje wtedy zmianę sumy.
+- Znaleziska należą do jednego z **czterech obszarów ryzyka**: obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie. Wynik obszaru = suma punktów, maks. 100. **Wynik ogólny = najgorszy obszar** (0–100, im mniej, tym lepiej). Gdy suma przekracza 100, raport podaje też pełną sumę (np. 4 i 10 znalezisk Critical dają ten sam wynik 100, ale inną sumę); porównanie z `-Previous` pokazuje wtedy zmianę sumy. Karta zmiany podaje też zmianę klasy ekspozycji i liczbę nowych znalezisk Critical (wynik może spaść mimo nowego Critical, jeśli najgorszy jest inny obszar), a sekcja porównania ostrzega, gdy poprzedni przegląd wykonano w innym trybie (testy DC, konto przeglądu, uprawnienia konta).
 - **Klasa ekspozycji A–E** wynika z najpoważniejszego znaleziska (Critical = E, High = D, Medium = C, Low = B, brak = A). Opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa organizacji.
 - **Macierz ryzyka** pokazuje punkty w podziale obszar × rodzaj ryzyka (np. „Łamanie haseł”, „Pass-the-hash”, „Replikacja i kondycja”).
+- Nazwy kont i grup w tabelach (np. „BUILTIN\Administratorzy” obok „FIRMA\Domain Admins”) zależą od języka systemu stacji, z której uruchomiono przegląd. Ocena opiera się na SID, więc wynik nie zależy od języka.
 - **Sprawdzone reguły** – status każdego testu: znalezisko, zaliczony, zaliczony warunkowo (np. ustawienie tylko w GPO podlinkowanym do OU – zakres do potwierdzenia), nie dotyczy, pominięty, wymaga `-UseWinRM`, błąd testu, nierozstrzygnięty.
 
 - **Plan naprawczy** – znaleziska w trzech etapach (do 30 dni / 30–90 dni / do 12 miesięcy) z szacunkiem pracochłonności i uwagami (zależności, kolejność). Znaleziska krytyczne zawsze w etapie 1. Szacunki są w tabeli `$planMeta` w skrypcie – warto je dostosować do własnych doświadczeń z wdrożeń.
@@ -124,7 +125,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 
 | ID | Waga | Test | MITRE ATT&CK |
 |---|---|---|---|
-| D-DCSYNC | Critical / High / Medium | Prawa replikacji haseł (DCSync) dla podmiotów spoza DC i administratorów. Zestaw praw liczony dla podmiotu łącznie z jego grupami: pełny (Get-Changes + Get-Changes-All) – Critical, High, gdy tylko konto synchronizacji Entra ID; niepełny – Medium | T1003.006 |
+| D-DCSYNC | Critical / High / Medium | Prawa replikacji haseł (DCSync) dla podmiotów spoza DC i administratorów. Zestaw praw liczony dla podmiotu łącznie z jego grupami: pełny (Get-Changes + Get-Changes-All) – Critical, High, gdy tylko konto synchronizacji Entra ID; niepełny – Medium; kolumna Uwagi podaje prawa nadane przez grupy | T1003.006 |
 | D-ACL-DOMAIN | Critical | GenericAll / WriteDacl / WriteOwner / zapis atrybutów obiektu domeny poza administratorami | T1222.001 |
 | D-ACL-ADMINSDHOLDER | Critical | Niestandardowe prawa zapisu lub resetu hasła na AdminSDHolder | T1098 |
 | D-ACL-GPO | High | GPO podpięte do domeny lub OU Domain Controllers modyfikowalne przez nie-adminów (obiekt AD i katalog SYSVOL) | T1484.001 |
@@ -208,6 +209,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-GPO-HARDPATH | Medium / Low | GPO osłabia Hardened UNC Paths dla SYSVOL/NETLOGON lub ich brak przy starszych systemach | T1557 |
 | D-GPO-PSLOG | Low | Żadne podlinkowane GPO nie włącza Script Block Logging (ustawienie tylko w GPO na OU/lokacji: „Zaliczony warunkowo”) | T1059.001 |
 | D-GPO-UNLINKED | Low | GPO bez aktywnych łączy do domeny, OU lub lokacji | – |
+| D-GPO-DEADLINK | Low | Łącza (gPLink) domeny, OU lub lokacji do GPO, które już nie istnieje | – |
 | D-SPN-DUP | Low | Ta sama nazwa SPN na kilku kontach w domenie | T1558.003 |
 | D-UPN-DUP | Low | Ta sama nazwa UPN na kilku kontach w domenie | – |
 | D-GPP-PASSWORD | Critical / High | Hasła w preferencjach GPO w SYSVOL: `cpassword` (Critical, odszyfrowywalne przez każdego) lub hasło autologowania jawnym tekstem (High); wszystkie GPO, także niepodlinkowane; raport nie zawiera haseł | T1552.006 |

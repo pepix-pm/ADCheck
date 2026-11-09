@@ -42,8 +42,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.28'
-$jsonSchemaVersion = '1.0'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
+$Version = '0.29'
+$jsonSchemaVersion = '1.1'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
@@ -638,6 +638,7 @@ $ruleCatalog = @(
     @{ Id = 'D-SPN-DUP';         O = 'S'; M = 'Konfiguracja kont';            C = 'DUPLICATES';   T = 'Zduplikowane SPN' }
     @{ Id = 'D-UPN-DUP';         O = 'S'; M = 'Konfiguracja kont';            C = 'DUPLICATES';   T = 'Zduplikowane UPN' }
     @{ Id = 'D-GPO-UNLINKED';    O = 'S'; M = 'Porządek w konfiguracji';      C = 'GPO-LINKS';    T = 'GPO bez aktywnych łączy' }
+    @{ Id = 'D-GPO-DEADLINK';    O = 'S'; M = 'Porządek w konfiguracji';      C = 'GPO-LINKS';    T = 'Łącza do nieistniejących GPO' }
     @{ Id = 'D-TRUST-SELAUTH';   O = 'T'; M = 'Relacje zaufania';             C = 'TRUSTS';       T = 'Zaufania bez uwierzytelniania selektywnego' }
     @{ Id = 'D-TRUST-STALE';     O = 'T'; M = 'Relacje zaufania';             C = 'TRUSTS';       T = 'Zaufania bez zmiany hasła > 90 dni' }
 )
@@ -830,6 +831,7 @@ $planMeta = @{
     'D-SPN-DUP'        = @(1, 3, 1, 'Ustalić, które konto faktycznie uruchamia usługę')
     'D-UPN-DUP'        = @(1, 2, 1, 'Sprawdzić wpływ na synchronizację z Entra ID')
     'D-GPO-UNLINKED'   = @(1, 2, 2, 'Kopia GPO (Backup-GPO) przed usunięciem')
+    'D-GPO-DEADLINK'   = @(0.5, 1, 2, '')
     'D-TRUST-SELAUTH'  = @(4, 12, 2, 'Najpierw nadać Allowed to Authenticate na potrzebnych serwerach')
     'D-TRUST-STALE'    = @(1, 3, 1, 'Ustalić z administratorem drugiej strony, czy relacja jest potrzebna')
 }
@@ -1050,6 +1052,11 @@ function Get-ErrorText($Err) {
     while ($e.InnerException) { $e = $e.InnerException }
     "$($e.Message.Trim()) (0x$('{0:X8}' -f $e.HResult))"
 }
+# Czy GPO o podanym DN nie istnieje (0x80072030 przy bezpośrednim odczycie). GPO nieczytelne daje pusty wynik lub inny błąd - wtedy $false.
+function Test-GpoMissing([string]$Dn) {
+    try { $null = Get-LdapObject -Identity $Dn -Properties displayName; $false }
+    catch { ($_.Exception.HResult -eq -2147016656) -or [bool]($_.Exception.InnerException -and $_.Exception.InnerException.HResult -eq -2147016656) }
+}
 # Odczyt GPO z gPLink kontenera; zwraca obiekty GPO z displayName, gPCFileSysPath, flags; błędy trafiają do $gpoReadErrors
 function Get-DcLinkedGpo {
     # Wszystkie GPO jednym wyszukiwaniem: GPO bez prawa odczytu po prostu nie wraca (bezpośrednie wiązanie z takim obiektem daje 0x8007200A)
@@ -1068,7 +1075,11 @@ function Get-DcLinkedGpo {
             if ([int]$m.Groups[2].Value -band 1) { continue }
             $dn = $m.Groups[1].Value
             $gpo = $all[$dn.ToLower()]
-            if (-not $gpo) { $gpoReadErrors[$dn] = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu albo GPO usunięte, a łącze zostało)'; continue }
+            if (-not $gpo) {
+                # łącze do usuniętego GPO zgłasza D-GPO-DEADLINK; tu tylko GPO nieczytelne
+                if (-not (Test-GpoMissing $dn)) { $gpoReadErrors[$dn] = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu)' }
+                continue
+            }
             if ($gpo.flags -band 2) { continue }
             if ($gpo.gPCFileSysPath -and -not (Test-Path -LiteralPath $gpo.gPCFileSysPath)) {
                 $gpoNoFiles["$($gpo.displayName)"] = $(if ($container -eq $domain.DistinguishedName) { 'domeny' } else { 'OU Domain Controllers' })
@@ -2075,6 +2086,18 @@ function Get-DcSyncSet([hashtable]$Rights, [string[]]$Sids) {
     else                   { '' }
 }
 
+# Prawa replikacji, które podmiot ma wyłącznie przez grupy (do kolumny Uwagi D-DCSYNC), np. "Get-Changes przez FIRMA\grupa"
+function Get-DcSyncSource([hashtable]$Rights, [string]$Sid, [string[]]$Sids) {
+    $own = if ($Rights.ContainsKey($Sid)) { $Rights[$Sid] } else { @{ GetChanges = $false; GetChangesAll = $false; Filtered = $false } }
+    $names = [ordered]@{ GetChanges = 'Get-Changes'; GetChangesAll = 'Get-Changes-All'; Filtered = 'In-Filtered-Set' }
+    $out = foreach ($k in $names.Keys) {
+        if ($own[$k]) { continue }
+        $via = @($Sids | Where-Object { $_ -ne $Sid -and $Rights.ContainsKey($_) -and $Rights[$_][$k] } | ForEach-Object { Resolve-SidName $_ })
+        if ($via.Count) { "$($names[$k]) przez $($via -join ', ')" }
+    }
+    @($out) -join '; '
+}
+
 # SID-y grup podmiotu (rekursywnie, z grupą podstawową) oraz Everyone i Authenticated Users; $null przy błędzie odczytu
 $aclGroupCache = @{}
 function Get-PrincipalGroupSids([string]$Sid) {
@@ -2134,13 +2157,16 @@ Invoke-Check 'ACL' {
     $dcsync   = @($domRows | Where-Object { @($_.Prawa -split '; ' | Where-Object { $_ -match $replRe }).Count } | ForEach-Object {
         $grp = Get-PrincipalGroupSids $_.SID
         $set = if ($null -eq $grp) { 'nieustalony (nie odczytano grup podmiotu - przyjęto pełny)' } else { Get-DcSyncSet $replMap $grp }
+        $isSync = ($_.Podmiot -split '\\')[-1] -match $syncRe
+        $notes = @($(if ($isSync) { 'prawdopodobnie konto synchronizacji Entra ID (Azure AD Connect)' }),
+                   $(if ($null -ne $grp) { Get-DcSyncSource $replMap $_.SID $grp })) | Where-Object { $_ }
         # kopia wiersza: ten sam wiersz może trafić też do D-ACL-DOMAIN, bez kolumn Zestaw/Uwagi
         $_ | Select-Object * | Add-Member -NotePropertyName Zestaw -NotePropertyValue $set -PassThru |
-             Add-Member -NotePropertyName Uwagi -NotePropertyValue $(if (($_.Podmiot -split '\\')[-1] -match $syncRe) { 'prawdopodobnie konto synchronizacji Entra ID (Azure AD Connect)' } else { '' }) -PassThru })
+             Add-Member -NotePropertyName Uwagi -NotePropertyValue (@($notes) -join '; ') -PassThru })
     $dcFull = @($dcsync | Where-Object { $_.Zestaw -like 'pełny*' -or $_.Zestaw -like 'nieustalony*' })
     Add-IfAny @{
         Id = 'D-DCSYNC'; Category = $catPriv
-        Severity = $(if (@($dcFull | Where-Object { -not $_.Uwagi }).Count) { 'Critical' } elseif ($dcFull.Count) { 'High' } else { 'Medium' })
+        Severity = $(if (@($dcFull | Where-Object { ($_.Podmiot -split '\\')[-1] -notmatch $syncRe }).Count) { 'Critical' } elseif ($dcFull.Count) { 'High' } else { 'Medium' })
         Title = $(if ($dcFull.Count) { 'Podmioty spoza administratorów i DC z prawem replikacji haseł (DCSync)' } else { 'Podmioty spoza administratorów i DC z niepełnymi prawami replikacji' })
         Objects = $dcsync
         Description = 'Prawa DS-Replication-Get-Changes i DS-Replication-Get-Changes-All na obiekcie domeny pozwalają pobrać z DC skróty haseł wszystkich kont, w tym krbtgt i administratorów (atak DCSync), bez logowania na DC i bez śladu na stacjach. Kto przejmie takie konto lub członka takiej grupy, przejmuje domenę. Legalnie oba prawa ma zwykle tylko konto synchronizacji Entra ID (Azure AD Connect, MSOL_*) - takie konto wymaga ochrony jak administrator domeny. Kolumna Zestaw uwzględnia prawa nadane podmiotowi bezpośrednio i przez jego grupy: "pełny" oznacza możliwość DCSync, "niepełny" - brak jednego z praw (DCSync niemożliwy, dopóki podmiot go nie dostanie; zwykle pozostałość do usunięcia).'
@@ -3326,19 +3352,42 @@ Invoke-Check 'DUPLICATES' {
     }
 }
 
-# GPO bez aktywnych łączy (domena, OU, lokacje)
+# GPO bez aktywnych łączy (domena, OU, lokacje) i łącza do GPO, które już nie istnieją
 Invoke-Check 'GPO-LINKS' {
     # Wbudowane GPO: ich usunięcie psuje narzędzia (dcgpofix, GPMC) i bywa nieodwracalne bez kopii - zalecenie inne niż dla zwykłych GPO
     $defaultGpo = @{ '{31B2F340-016D-11D2-945F-00C04FB984F9}' = 'Default Domain Policy'; '{6AC1786C-016F-11D2-945F-00C04FB984F9}' = 'Default Domain Controllers Policy' }
     $links = @{}   # DN GPO -> 'on' (choć jedno łącze włączone) | 'off' (tylko wyłączone)
+    $where = @{}   # DN GPO -> miejsca podlinkowania
     $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
     foreach ($h in $holders) {
         foreach ($m in [regex]::Matches("$($h.gplink)", '\[LDAP://([^;\]]+);(\d+)\]')) {
             $k = $m.Groups[1].Value.ToLower()
             if (-not ([int]$m.Groups[2].Value -band 1)) { $links[$k] = 'on' } elseif (-not $links.ContainsKey($k)) { $links[$k] = 'off' }
+            if (-not $where.ContainsKey($k)) { $where[$k] = [System.Collections.Generic.List[string]]::new() }
+            $where[$k].Add("$($h.distinguishedname)")
         }
     }
-    $rows = @(foreach ($g in @(Find-Ldap -SearchBase "CN=Policies,CN=System,$domainDn" -Scope OneLevel -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, whenChanged)) {
+    $gpoList = @(Find-Ldap -SearchBase "CN=Policies,CN=System,$domainDn" -Scope OneLevel -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, whenChanged)
+    $gpoSeen = @{}
+    foreach ($g in $gpoList) { $gpoSeen["$($g.distinguishedname)".ToLower()] = $true }
+    # Łącza do GPO tej domeny, których obiekt nie istnieje (0x80072030); GPO nieczytelne dla konta przeglądu są w INFO-GPO-READ
+    $polSuffix = ",cn=policies,cn=system,$domainDn".ToLower()
+    $dead = @(foreach ($k in @($links.Keys | Sort-Object)) {
+        if ($gpoSeen.ContainsKey($k) -or -not $k.EndsWith($polSuffix)) { continue }
+        if (-not (Test-GpoMissing $k)) { continue }
+        [pscustomobject]@{ GPO = $(if ($k -match '^cn=(\{[0-9a-f-]{36}\}),') { $Matches[1].ToUpper() } else { $k })
+                           Podlinkowane = (@($where[$k] | Sort-Object -Unique) -join '; '); Lacze = $(if ($links[$k] -eq 'on') { 'włączone' } else { 'wyłączone' }) }
+    })
+    Add-IfAny @{
+        Id = 'D-GPO-DEADLINK'; Category = $catDom; Severity = 'Low'
+        Title = 'Łącza do nieistniejących GPO'
+        Objects = $dead
+        Description = 'Domena, OU lub lokacja ma w atrybucie gPLink łącze do GPO, którego obiektu nie ma już w AD (GPO usunięto, a łącze zostało - np. po usunięciu GPO narzędziem innym niż GPMC albo po przywróceniu OU z kopii). Łącze nie działa, ale zaciemnia obraz konfiguracji, a narzędzia raportujące i część skryptów zgłaszają przy nim błędy. Łącza z OU innych domen lasu nie są sprawdzane.'
+        Recommendation = 'Ustalić, czy GPO usunięto celowo. Jeśli tak - usunąć łącze; jeśli nie - odtworzyć GPO z kopii (Restore-GPO) i sprawdzić, które ustawienia przestały obowiązywać.'
+        Fix = (Fx 'Get-ADObject -Identity "<DN z kolumny Podlinkowane>" -Properties gPLink | Select-Object -ExpandProperty gPLink   # wpis z GUID z kolumny GPO',
+                  'Set-ADObject -Identity "<DN z kolumny Podlinkowane>" -Replace @{ gPLink = ''<gPLink bez wpisu [LDAP://cn={GUID},cn=policies,...;n]>'' }   # po kopii wartości')
+    }
+    $rows = @(foreach ($g in $gpoList) {
         $st = $links["$($g.distinguishedname)".ToLower()]
         if ($st -eq 'on') { continue }
         [pscustomobject]@{ GPO = $g.displayname; Identyfikator = $g.name; Lacza = $(if ($st -eq 'off') { 'tylko wyłączone' } else { 'brak' })
@@ -3966,11 +4015,12 @@ if (-not $SkipDCChecks) {
         $regF  = @($fail | Where-Object { $_.Obszar -in 'Opcje zabezpieczeń', 'Szablony administracyjne' })
         $audF  = @($fail | Where-Object Obszar -eq 'Zasady audytu')
         $rigF  = @($fail | Where-Object Obszar -eq 'Przypisanie praw użytkowników')
-        $gpoNote = if ($UseWinRM) { 'Wartości odczytano z rejestru i auditpol każdego DC (stan rzeczywisty).' } else { 'Wartości odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona); ustawienia lokalne DC mogą się różnić - dokładny stan daje -UseWinRM.' }
         # GPO bez folderu w SYSVOL: wartości "nieustawione" wynikają z braku plików polityki, a nie z jej treści
-        if (-not $UseWinRM -and $gpoNoFiles.Count) {
-            $gpoNote += " Uwaga: $(($gpoNoFiles.Keys | Sort-Object | ForEach-Object { "GPO '$_' (podlinkowane do $($gpoNoFiles[$_]))" }) -join ', ') nie ma folderu w SYSVOL (albo konto przeglądu nie ma do niego dostępu) - ustawienia z niego nie są stosowane i nie zostały odczytane (patrz D-GPO-SYNC)."
-        }
+        $gpoMissing = if ($gpoNoFiles.Count) { " Uwaga: $(($gpoNoFiles.Keys | Sort-Object | ForEach-Object { "GPO '$_' (podlinkowane do $($gpoNoFiles[$_]))" }) -join ', ') nie ma folderu w SYSVOL (albo konto przeglądu nie ma do niego dostępu) - ustawienia z niego nie są stosowane i nie zostały odczytane (patrz D-GPO-SYNC)." } else { '' }
+        $gpoNote = if ($UseWinRM) { 'Wartości odczytano z rejestru i auditpol każdego DC (stan rzeczywisty).' } else { "Wartości odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona); ustawienia lokalne DC mogą się różnić - dokładny stan daje -UseWinRM.$gpoMissing" }
+        # Przypisanie praw zawsze z GPO - także przy -UseWinRM
+        $rightsNote = "Przypisania praw odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona$(if ($UseWinRM) { ', także przy -UseWinRM' })).$gpoMissing"
+        $summaryNote = if ($UseWinRM) { "Opcje zabezpieczeń, szablony administracyjne i audyt odczytano z rejestru i auditpol każdego DC (stan rzeczywisty); przypisania praw - z GPO (konfiguracja zamierzona).$gpoMissing" } else { $gpoNote }
 
         Add-IfAny @{
             Id = 'DC-CIS-REG'; Category = $catCis; Severity = (Get-TopSeverity $regF)
@@ -3993,7 +4043,7 @@ if (-not $SkipDCChecks) {
             Id = 'DC-CIS-RIGHTS'; Category = $catCis; Severity = (Get-TopSeverity $rigF)
             Title = 'Przypisanie praw użytkowników na DC niezgodne z CIS L1'
             Objects = $rigF
-            Description = "Prawa takie jak logowanie lokalne lub przez RDP na DC, ładowanie sterowników, kopia zapasowa/przywracanie plików czy debugowanie programów pozwalają przejąć kontroler domeny. Domyślna Default Domain Controllers Policy nadaje część z nich grupom operatorów (Account/Server/Print/Backup Operators). $gpoNote"
+            Description = "Prawa takie jak logowanie lokalne lub przez RDP na DC, ładowanie sterowników, kopia zapasowa/przywracanie plików czy debugowanie programów pozwalają przejąć kontroler domeny. Domyślna Default Domain Controllers Policy nadaje część z nich grupom operatorów (Account/Server/Print/Backup Operators). $rightsNote"
             Recommendation = 'Ograniczyć prawa do Administrators zgodnie z kolumną Oczekiwane; grupy operatorów pozostawić puste. Zmieniać w GPO dla OU Domain Controllers.'
             Fix = (Fx '# GPMC > Default Domain Controllers Policy (lub dedykowane GPO) > Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > User Rights Assignment')
             Mitre = 'T1078.002'
@@ -4021,7 +4071,7 @@ if (-not $SkipDCChecks) {
             Id = 'DC-CIS-SUMMARY'; Category = $catCis; Severity = 'Info'
             Title = "Zgodność DC: CIS L1 $okCount z $($evaluated.Count) ($pct%), Microsoft Security Baseline $msOk z $($msEval.Count) ($msPct%)$(if ($cisRows.Count -gt $evaluated.Count) { "; poza oceną CIS: $($cisRows.Count - $evaluated.Count)" })"
             Objects = $cisRows
-            Description = "Pełna lista sprawdzonych ustawień ze statusem wg dwóch wzorców: kolumny Oczekiwane/Zgodne - wybrane kontrole CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny); kolumny Microsoft/ZgodneMS - Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller, wg Microsoft Learn, stan 2026-01). Nie jest to pełna ocena zgodności z żadnym z nich; przypisanie praw użytkowników porównano tylko z CIS. $gpoNote"
+            Description = "Pełna lista sprawdzonych ustawień ze statusem wg dwóch wzorców: kolumny Oczekiwane/Zgodne - wybrane kontrole CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny); kolumny Microsoft/ZgodneMS - Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller, wg Microsoft Learn, stan 2026-01). Nie jest to pełna ocena zgodności z żadnym z nich; przypisanie praw użytkowników porównano tylko z CIS. $summaryNote"
         }
     }
 }
@@ -4656,14 +4706,30 @@ if ($Previous) {
     # $prev wczytany i sprawdzony (Meta, SchemaVersion) w regionie wymagań
     $prevIds = @($prev.Znaleziska | Where-Object Severity -ne 'Info' | ForEach-Object { $_.Id })
     $currIds = @($real | ForEach-Object { $_.Id })
+    $prevCrit = @($prev.Znaleziska | Where-Object Severity -eq 'Critical' | ForEach-Object { $_.Id })
     $diff = [ordered]@{
         PoprzedniaData  = $prev.Meta.Data
         PoprzedniWynik  = $prev.Meta.Wynik
         # raporty sprzed 0.28 nie mają sumy bez limitu - wtedy brak (porównanie tylko wyniku 0-100)
         PoprzedniaSuma  = $(if ($prev.Meta.ObszaryBezLimitu) { [int](($prev.Meta.ObszaryBezLimitu.PSObject.Properties.Value | Measure-Object -Maximum).Maximum) } else { $null })
+        PoprzedniaKlasa = $(if ($prev.Meta.KlasaEkspozycji) { "$($prev.Meta.KlasaEkspozycji)" } else { $null })
         Nowe            = @($currIds | Where-Object { $_ -notin $prevIds })
+        # Critical, których wcześniej nie było jako Critical (nowe Id albo podniesiona waga)
+        NoweCritical    = @($real | Where-Object { $_.Severity -eq 'Critical' -and $_.Id -notin $prevCrit } | ForEach-Object { $_.Id } | Select-Object -Unique)
         Usuniete        = @($prevIds | Where-Object { $_ -notin $currIds })
+        RozneTryby      = @()
     }
+    # Przebiegi w innym trybie widzą inne dane (źródło testów DC, zakres widoczny dla konta) - zmiany mogą nie wynikać ze zmian w AD
+    $modeDiff = [System.Collections.Generic.List[string]]::new()
+    if ("$($prev.Meta.TestyDC)" -and "$($prev.Meta.TestyDC)" -ne $dcMethod) { $modeDiff.Add("testy DC: poprzednio '$($prev.Meta.TestyDC)', teraz '$dcMethod'") }
+    $prevLdap = "$($prev.Meta.KontoLdap)"
+    $currLdap = $(if ($ldapIdentity) { $ldapIdentity } else { 'nieustalone' })
+    if ($prevLdap -and $prevLdap -ne 'nieustalone' -and $currLdap -ne 'nieustalone' -and $prevLdap -ne $currLdap) { $modeDiff.Add("konto przeglądu: poprzednio $prevLdap, teraz $currLdap") }
+    if ($prev.Meta.PSObject.Properties.Name -contains 'KontoUprzywilejowane') {
+        if ([bool]$prev.Meta.KontoUprzywilejowane -ne $runAsPriv) { $modeDiff.Add("uprawnienia konta: poprzednio $(if ($prev.Meta.KontoUprzywilejowane) { 'uprzywilejowane' } else { 'zwykłe' }), teraz $(if ($runAsPriv) { 'uprzywilejowane' } else { 'zwykłe' })") }
+    }
+    $diff.RozneTryby = @($modeDiff)
+    if ($modeDiff.Count) { Write-Step "  -Previous: poprzedni przegląd w innym trybie ($($modeDiff -join '; ')) - część różnic może wynikać z trybu, nie ze zmian w AD" 'Yellow' }
 }
 
 $meta = [ordered]@{
@@ -4681,6 +4747,7 @@ $meta = [ordered]@{
     KontoLdap = $(if ($ldapIdentity) { $ldapIdentity } else { 'nieustalone' })
     Stacja    = $env:COMPUTERNAME
     TestyDC   = $dcMethod
+    KontoUprzywilejowane = $runAsPriv
 }
 
 $invDomain = @(
@@ -4894,7 +4961,12 @@ if ($diff) {
         $dSum = $scoreRaw - [int]$diff.PoprzedniaSuma
         $sumNote = "; suma punktów $(if ($dSum -gt 0) { "+$dSum" } else { "$dSum" }) (było $($diff.PoprzedniaSuma))"
     }
-    [void]$sb.Append("<div class=`"card`"><div class=`"v`">$sign</div><div class=`"k`">Zmiana od $(HtmlEnc $pd) (było $($diff.PoprzedniWynik)$sumNote)</div></div>")
+    # wynik to najgorszy obszar, więc może spaść mimo nowego Critical - zmiana klasy i nowe Critical podane obok
+    $clsNote = ''
+    if ($diff.PoprzedniaKlasa -and $diff.PoprzedniaKlasa -ne "$exposure") { $clsNote += "; klasa ekspozycji $($diff.PoprzedniaKlasa) &rarr; $exposure" }
+    if (@($diff.NoweCritical).Count) { $clsNote += "; nowe Critical: $(@($diff.NoweCritical).Count)" }
+    $worse = ($diff.PoprzedniaKlasa -and [string]::CompareOrdinal("$exposure", "$($diff.PoprzedniaKlasa)") -gt 0) -or @($diff.NoweCritical).Count
+    [void]$sb.Append("<div class=`"card$(if ($worse) { ' r3' })`"><div class=`"v`">$sign</div><div class=`"k`">Zmiana od $(HtmlEnc $pd) (było $($diff.PoprzedniWynik)$sumNote$clsNote)</div></div>")
 }
 [void]$sb.Append('</div><div class="cards">')
 foreach ($a in $areaScore.Keys) {
@@ -4922,6 +4994,12 @@ if ($covParts.Count) { $covText += "; nieocenione: $($covParts -join ', ') - wyn
 
 if ($diff) {
     [void]$sb.Append('<section><h2>Porównanie z poprzednim przeglądem</h2>')
+    if (@($diff.RozneTryby).Count) {
+        [void]$sb.Append("<p class=`"note`"><b>Uwaga:</b> poprzedni przegląd wykonano w innym trybie ($(HtmlEnc ($diff.RozneTryby -join '; '))). Część różnic może wynikać z innego źródła danych lub zakresu widocznego dla konta, a nie ze zmian w AD.</p>")
+    }
+    if (@($diff.NoweCritical).Count) {
+        [void]$sb.Append("<p><b>Nowe znaleziska Critical:</b> $(HtmlEnc ($diff.NoweCritical -join ', '))</p>")
+    }
     [void]$sb.Append("<p><b>Nowe znaleziska:</b> $(HtmlEnc (($diff.Nowe) -join ', '))</p><p><b>Usunięte (naprawione):</b> $(HtmlEnc (($diff.Usuniete) -join ', '))</p></section>")
 }
 
