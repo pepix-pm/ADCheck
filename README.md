@@ -191,7 +191,11 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | C-LAPS-EXPIRED | Medium | Hasło LAPS przestało się zmieniać (wygasło, a komputer był w sieci) | T1550.002 |
 | C-LAPS-LEGACY | Low | Komputery na wycofanym Microsoft LAPS (legacy) | T1550.002 |
 | C-LAPS-READERS | Low | Kto spoza DA/EA może czytać hasła LAPS (ACL na OU) – do weryfikacji | T1555 |
-| C-OWNER | Medium | Komputery, których właścicielem jest zwykłe konto (ryzyko RBCD / odczytu LAPS) | T1134 |
+| C-OWNER | Medium | Aktywne komputery (poza DC), których właścicielem jest konto spoza administratorów (ryzyko RBCD / odczytu LAPS) | T1134 |
+| D-OWNER-OU | High | OU, kontenery i obiekt domeny z właścicielem spoza administratorów (właściciel może nadać sobie pełną kontrolę nad zawartością) | T1222.001 |
+| D-OWNER-GPO | High / Medium | Wszystkie GPO z właścicielem spoza administratorów (Medium, gdy żadne nie ma aktywnego łącza) | T1484.001 |
+| P-OWNER-GROUP | High / Medium | Grupy spoza Tier 0 z właścicielem spoza administratorów (High przy adminCount=1) | T1098 |
+| U-OWNER-USER | High / Medium | Konta użytkowników spoza Tier 0, także wyłączone, z właścicielem spoza administratorów (High przy adminCount=1) | T1098 |
 | C-MAQ | Medium | MachineAccountQuota > 0 | T1136.002 |
 | C-STALE | Low | Nieużywane konta komputerów | T1078.002 |
 | D-RECYCLE | Medium | Kosz AD wyłączony | – |

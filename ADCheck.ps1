@@ -182,7 +182,8 @@ function Find-Ldap {
         [ValidateSet('Base', 'OneLevel', 'Subtree')][string]$Scope = 'Subtree',
         [string[]]$Properties = @(),
         [string]$Server = $LdapServer,
-        [switch]$SecurityDescriptor
+        [switch]$SecurityDescriptor,
+        [switch]$OwnerOnly   # z -SecurityDescriptor: tylko właściciel (mniej danych niż pełny DACL)
     )
     if (-not $SearchBase) { $SearchBase = $domainDn }
     $root = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://$Server/" + ($SearchBase -replace '/', '\/'))
@@ -192,7 +193,7 @@ function Find-Ldap {
     $load = @('distinguishedName', 'name', 'objectClass', 'sAMAccountName', 'userAccountControl', 'objectSid',
               'pwdLastSet', 'lastLogonTimestamp', 'whenCreated') + $Properties
     foreach ($p in @($load | Where-Object { $_ } | Sort-Object -Unique)) { [void]$s.PropertiesToLoad.Add($p) }
-    if ($SecurityDescriptor) { $s.SecurityMasks = [System.DirectoryServices.SecurityMasks]'Dacl,Owner,Group' }
+    if ($SecurityDescriptor) { $s.SecurityMasks = $(if ($OwnerOnly) { [System.DirectoryServices.SecurityMasks]'Owner' } else { [System.DirectoryServices.SecurityMasks]'Dacl,Owner,Group' }) }
     $res = $null
     try {
         $res = $s.FindAll()
@@ -607,6 +608,10 @@ $ruleCatalog = @(
     @{ Id = 'P-ADMLOGIN';        O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Wbudowany Administrator używany' }
     @{ Id = 'P-PROTECTED';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane spoza Protected Users' }
     @{ Id = 'C-OWNER';           O = 'A'; M = 'Delegacja';                    C = 'COMP-OWNER';   T = 'Komputery z właścicielem spoza administratorów' }
+    @{ Id = 'D-OWNER-OU';        O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'OU i kontenery z właścicielem spoza administratorów' }
+    @{ Id = 'D-OWNER-GPO';       O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'GPO z właścicielem spoza administratorów' }
+    @{ Id = 'P-OWNER-GROUP';     O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'Grupy z właścicielem spoza administratorów' }
+    @{ Id = 'U-OWNER-USER';      O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'Konta użytkowników z właścicielem spoza administratorów' }
     @{ Id = 'D-PREWIN2000';      O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'Szerokie grupy w Pre-Windows 2000 Compatible Access' }
     @{ Id = 'D-DSHEURISTICS';    O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'dSHeuristics osłabia zabezpieczenia' }
     @{ Id = 'D-DNS-CREATECHILD'; O = 'A'; M = 'Przechwytywanie i relay';      C = 'DNS-ZONES';       T = 'Strefy DNS bez ochrony przed ADIDNS spoofing' }
@@ -799,6 +804,10 @@ $planMeta = @{
     'P-ADMLOGIN'       = @(1, 4, 2, 'Ustalić, kto i skąd używa konta; usługi przenieść na gMSA')
     'P-PROTECTED'      = @(2, 6, 2, 'Etapami, najpierw konto testowe')
     'C-OWNER'          = @(1, 4, 2, 'Zmiana właściciela skryptem; razem z C-MAQ')
+    'D-OWNER-OU'       = @(1, 3, 1, 'Kopia listy właścicieli przed zmianą; bez wpływu na użytkowników')
+    'D-OWNER-GPO'      = @(1, 3, 1, 'Kopia listy właścicieli przed zmianą; ustawienia GPO bez zmian')
+    'P-OWNER-GROUP'    = @(1, 4, 2, 'Kopia listy właścicieli; zmiana skryptem razem z U-OWNER-USER')
+    'U-OWNER-USER'     = @(1, 4, 2, 'Kopia listy właścicieli; zmiana skryptem, bez wpływu na logowanie')
     'D-PREWIN2000'     = @(1, 3, 2, 'Test zgodności starszych systemów i urządzeń')
     'D-DSHEURISTICS'   = @(1, 2, 2, 'Ustalić przyczynę zmiany przed przywróceniem')
     'D-DNS-CREATECHILD' = @(1, 3, 2, 'Rekord wildcard w każdej strefie; uzgodnić adres docelowy')
@@ -927,7 +936,7 @@ function Add-IfAny([hashtable]$F) {
 # Nazwy testów w konsoli
 $checkLabels = @{
     'PRIV' = 'Konta uprzywilejowane'; 'USERS' = 'Konta użytkowników'; 'COMPUTERS' = 'Komputery, systemy i LAPS'
-    'COMP-OWNER' = 'Właściciele kont komputerów'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'; 'ACL-TIER0' = 'Uprawnienia Tier 0, delegacja do DC'
+    'COMP-OWNER' = 'Właściciele kont komputerów'; 'OWNERS' = 'Właściciele OU, GPO, grup i kont'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'; 'ACL-TIER0' = 'Uprawnienia Tier 0, delegacja do DC'
     'LAPS-ACL' = 'Dostęp do haseł LAPS'; 'KRB-ENC' = 'Kerberos: szyfrowanie DES/RC4'; 'DOMAIN' = 'Domena, las, hasła, DNS'
     'DC-OS' = 'Systemy kontrolerów domeny'; 'DC-GPO' = 'GPO kontrolerów domeny'; 'GPO-ALL' = 'GPO w całej domenie'; 'GPP' = 'Hasła w preferencjach GPO (SYSVOL)'
     'CIS' = 'Konfiguracja DC (CIS i Microsoft)'; 'DC-PATCH' = 'Aktualizacje kontrolerów domeny'; 'REPL' = 'Replikacja AD'
@@ -1938,8 +1947,18 @@ Invoke-Check 'COMPUTERS' {
 # Komputer dołączony przez zwykłe konto (MachineAccountQuota lub delegacja) ma je jako właściciela obiektu.
 # Właściciel może zmienić ACL, a więc ustawić RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity) i przejąć komputer
 # albo nadać sobie odczyt hasła LAPS. Odczyt właściciela (SecurityMasks Owner) działa na zwykłym koncie.
+# Dopuszczalni właściciele (także D-OWNER-*, P-OWNER-GROUP, U-OWNER-USER): Domain Admins, Enterprise Admins, Schema Admins,
+# Domain Controllers, Enterprise Domain Controllers, Administrators, SYSTEM oraz konta i grupy uprzywilejowane (po SID).
+$forestRootSid = $dSid
+try { $forestRootSid = (Get-LdapObject -Identity $rootDse.rootDomainNamingContext).SID.Value } catch { $forestRootSid = $dSid }
+$ownerOk = @{}
+foreach ($okSid in "$dSid-512", "$forestRootSid-519", "$forestRootSid-518", "$dSid-516", 'S-1-5-9', 'S-1-5-32-544', 'S-1-5-18') { $ownerOk[$okSid] = $true }
+function Test-OwnerTrusted([string]$Sid) { $ownerOk.ContainsKey($Sid) -or $privBySid.ContainsKey($Sid) }
+function Get-OwnerSid($Obj) {
+    if ($Obj.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { return $null }
+    try { "$($Obj.ntsecuritydescriptor.GetOwner([System.Security.Principal.SecurityIdentifier]))" } catch { $null }
+}
 Invoke-Check 'COMP-OWNER' {
-    $okOwners = @("$dSid-512", "$dSid-519", "$dSid-516", 'S-1-5-32-544', 'S-1-5-32-548', 'S-1-5-18')
     $sidName  = @{}
     $resolve  = {
         param([string]$Sid)
@@ -1950,16 +1969,17 @@ Invoke-Check 'COMP-OWNER' {
         }
         $sidName[$Sid]
     }
-    $created = @(Find-Ldap -SecurityDescriptor -Properties nTSecurityDescriptor, operatingSystem, primaryGroupID, 'mS-DS-CreatorSID' -Filter (
-                '(&(objectCategory=computer)(mS-DS-CreatorSID=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))') |
+    # wszystkie aktywne komputery poza DC: utworzone przez MachineAccountQuota (mS-DS-CreatorSID) i przez konto z delegacją na OU
+    $created = @(Find-Ldap -SecurityDescriptor -OwnerOnly -Properties nTSecurityDescriptor, operatingSystem, primaryGroupID, 'mS-DS-CreatorSID' -Filter (
+                '(&(objectCategory=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))') |
                 Where-Object { [int]$_.primarygroupid -notin 516, 521 })
     $noSd = @($created | Where-Object { $_.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity] }).Count
     $rows = foreach ($c in $created) {
         if ($c.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { continue }
-        $owner = "$($c.ntsecuritydescriptor.GetOwner([System.Security.Principal.SecurityIdentifier]))"
-        if ($owner -in $okOwners) { continue }
+        $owner = Get-OwnerSid $c
+        if (-not $owner -or (Test-OwnerTrusted $owner)) { continue }
         $creator = ''
-        try { $creator = "$([System.Security.Principal.SecurityIdentifier]::new([byte[]]$c.'ms-ds-creatorsid', 0))" } catch { $creator = '' }
+        if ($c.'ms-ds-creatorsid') { try { $creator = "$([System.Security.Principal.SecurityIdentifier]::new([byte[]]$c.'ms-ds-creatorsid', 0))" } catch { $creator = '' } }
         ConvertTo-ComputerRow $c |
             Add-Member -NotePropertyName Wlasciciel -NotePropertyValue (& $resolve $owner) -PassThru |
             Add-Member -NotePropertyName Utworzyl -NotePropertyValue $(if ($creator) { & $resolve $creator } else { '' }) -PassThru
@@ -1977,7 +1997,7 @@ Invoke-Check 'COMP-OWNER' {
     }
     if ($noSd) {
         Add-Finding @{ Id = 'C-OWNER-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'
-                       Title = "Nie odczytano właściciela $noSd z $($created.Count) kont komputerów utworzonych przez użytkowników (mS-DS-CreatorSID)"
+                       Title = "Nie odczytano właściciela $noSd z $($created.Count) aktywnych kont komputerów"
                        Description = 'Brak uprawnienia do odczytu deskryptora zabezpieczeń - test C-OWNER nie objął tych obiektów.' }
     }
 }
@@ -3353,6 +3373,114 @@ Invoke-Check 'DUPLICATES' {
         Recommendation = 'Ustalić właściwe konto i zmienić UPN pozostałych.'
         Fix = (Fx 'Get-ADUser -Filter "UserPrincipalName -eq ''<UPN>''" | Select-Object SamAccountName, Enabled, DistinguishedName',
                   'Set-ADUser -Identity <konto> -UserPrincipalName <nowy UPN>')
+    }
+}
+
+# Właściciele OU i kontenerów, GPO, grup i kont użytkowników. Właściciel obiektu zawsze może zmienić jego uprawnienia (WriteDacl),
+# więc ma w praktyce pełną kontrolę - także gdy delegacja na OU została później odebrana. Typowe źródło: obiekty zakładane zwykłym
+# kontem administratora albo kontem helpdesku z delegacją. Obiekty Tier 0 (konta i grupy uprzywilejowane, DC, OU Domain Controllers)
+# ocenia P-ACL-TIER0, komputery - C-OWNER. Odczyt samego właściciela działa na zwykłym koncie.
+function Get-OwnerAggregate($Rows) {
+    # jeden wiersz na właściciela (w dużych domenach jedno konto bywa właścicielem setek obiektów); pełna lista w _obiekty.csv
+    @($Rows | Group-Object SID | ForEach-Object {
+        $g = @($_.Group); $objs = @($g | ForEach-Object { $_.Obiekt } | Sort-Object -Unique)
+        [pscustomobject]@{
+            Wlasciciel = $g[0].Wlasciciel; Czlonkowie = (Get-PrincipalMemberList $g[0].SID); Obiekty = $objs.Count
+            Przyklady  = (@($objs | Select-Object -First 5) -join '; ') + $(if ($objs.Count -gt 5) { " (+$($objs.Count - 5))" } else { '' })
+            SID = $g[0].SID
+        }
+    } | Sort-Object @{ e = { $_.Obiekty }; Descending = $true })
+}
+Invoke-Check 'OWNERS' {
+    $ownerName = @{}
+    $nm = { param([string]$Sid) if (-not $ownerName.ContainsKey($Sid)) { $ownerName[$Sid] = Resolve-SidName $Sid }; $ownerName[$Sid] }
+    $cnt = @{ NoSd = 0 }
+    $collect = {
+        param($Objects, [scriptblock]$Label)
+        foreach ($o in $Objects) {
+            $own = Get-OwnerSid $o
+            if (-not $own) { $cnt.NoSd++; continue }
+            if (Test-OwnerTrusted $own) { continue }
+            [pscustomobject]@{ Obiekt = (& $Label $o); Wlasciciel = (& $nm $own); SID = $own }
+        }
+    }
+    $polDn = ",CN=Policies,CN=System,$domainDn"
+    $dcOu  = "$($domain.DomainControllersContainer)"
+
+    # OU, kontenery i obiekt domeny (bez kontenerów wewnątrz GPO i bez OU Domain Controllers - P-ACL-TIER0)
+    $ous = @(Find-Ldap -SecurityDescriptor -OwnerOnly -Properties nTSecurityDescriptor -Filter '(|(objectClass=organizationalUnit)(objectClass=container)(objectClass=domainDNS)(objectClass=builtinDomain))' |
+             Where-Object { "$($_.distinguishedname)" -notlike "*$polDn" -and "$($_.distinguishedname)" -ne $dcOu })
+    $ouRows = @(& $collect $ous { param($o) "$($o.distinguishedname)" })
+    Add-IfAny @{
+        Id = 'D-OWNER-OU'; Category = $catDom; Severity = 'High'
+        Title = 'OU i kontenery, których właścicielem jest konto spoza administratorów'
+        Objects = (Get-OwnerAggregate $ouRows)
+        Detail = $ouRows
+        Description = 'Właściciel OU lub kontenera może w każdej chwili nadać sobie pełną kontrolę nad nim i - przez dziedziczenie - nad wszystkimi kontami, grupami i komputerami w środku (reset haseł, zmiana członkostwa, RBCD, odczyt LAPS). Działa to także wtedy, gdy delegację na OU odebrano, bo prawa właściciela nie wynikają z listy uprawnień. Typowe źródło: OU zakładane zwykłym kontem administratora albo kontem z delegacją.'
+        Recommendation = 'Przed zmianą zachować listę (kolumny Wlasciciel i Obiekty, pełna lista w _obiekty.csv). Zmienić właściciela na Domain Admins; zmiana nie wpływa na działanie kont i komputerów w OU. Delegacje nadawać grupom przez wpisy w uprawnieniach, a nie przez własność obiektu. Nowe OU zakładać kontem administratora domeny.'
+        Fix = (Fx '$dn = "<DN z kolumny Przyklady / _obiekty.csv>"; $acl = Get-Acl "AD:$dn"',
+                  '$acl.SetOwner([System.Security.Principal.SecurityIdentifier]''{SID}-512''); Set-Acl -Path "AD:$dn" -AclObject $acl')
+        Mitre = 'T1222.001'
+    }
+
+    # Wszystkie GPO (D-ACL-GPO ocenia tylko uprawnienia GPO podlinkowanych do domeny i OU Domain Controllers)
+    $linked = @{}
+    $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
+    foreach ($h in $holders) {
+        foreach ($m in [regex]::Matches("$($h.gplink)", '\[LDAP://([^;\]]+);(\d+)\]')) { if (-not ([int]$m.Groups[2].Value -band 1)) { $linked[$m.Groups[1].Value.ToLower()] = $true } }
+    }
+    $gpos = @(Find-Ldap -SearchBase "CN=Policies,CN=System,$domainDn" -Scope OneLevel -SecurityDescriptor -OwnerOnly -Properties nTSecurityDescriptor, displayName -Filter '(objectClass=groupPolicyContainer)')
+    $gpoRows = @(& $collect $gpos { param($o) "$($o.displayname) $("$($o.name)".ToUpper())$(if (-not $linked.ContainsKey("$($o.distinguishedname)".ToLower())) { ' (bez aktywnych łączy)' })" })
+    Add-IfAny @{
+        Id = 'D-OWNER-GPO'; Category = $catDom
+        Severity = $(if (@($gpoRows | Where-Object { $_.Obiekt -notlike '*(bez aktywnych łączy)' }).Count) { 'High' } else { 'Medium' })
+        Title = 'GPO, których właścicielem jest konto spoza administratorów'
+        Objects = (Get-OwnerAggregate $gpoRows)
+        Detail = $gpoRows
+        Description = 'Właściciel GPO może nadać sobie prawo edycji i dopisać do GPO dowolne ustawienie, skrypt lub zadanie zaplanowane - wykona się ono na wszystkich komputerach albo u wszystkich użytkowników, do których GPO jest podlinkowane, zwykle z uprawnieniami SYSTEM. GPO bez aktywnych łączy (oznaczone w kolumnie Przyklady) zagrażają dopiero po podlinkowaniu, stąd niższa waga, gdy tylko takie występują. Właścicielem GPO zostaje konto, które je utworzyło - także członek Group Policy Creator Owners (patrz P-GPCO).'
+        Recommendation = 'Zachować listę, a potem zmienić właściciela GPO na Domain Admins (obiekt w AD; uprawnienia folderu w SYSVOL GPMC synchronizuje przy zmianie uprawnień GPO). Uprawnienia edycji nadawać grupom w zakładce Delegowanie GPMC. Zmiana właściciela nie zmienia ustawień GPO.'
+        Fix = (Fx '$dn = "CN=<GUID z kolumny Przyklady>,CN=Policies,CN=System,<DN domeny>"; $acl = Get-Acl "AD:$dn"',
+                  '$acl.SetOwner([System.Security.Principal.SecurityIdentifier]''{SID}-512''); Set-Acl -Path "AD:$dn" -AclObject $acl',
+                  'Get-GPPermission -Guid <GUID> -All | Format-Table Trustee, Permission   # po zmianie')
+        Mitre = 'T1484.001'
+    }
+
+    # Grupy i aktywne konta użytkowników spoza Tier 0
+    $groups = @(Find-Ldap -SecurityDescriptor -OwnerOnly -Properties nTSecurityDescriptor, adminCount -Filter '(objectClass=group)' |
+                Where-Object { -not ($_.SID -and $privBySid.ContainsKey($_.SID.Value)) -and -not ($_.SID -and $_.SID.Value -like 'S-1-5-32-*') })
+    $grpRows = @(& $collect $groups { param($o) "$($o.samaccountname)$(if ([int]$o.admincount -eq 1) { ' (adminCount=1)' })" })
+    Add-IfAny @{
+        Id = 'P-OWNER-GROUP'; Category = $catPriv
+        Severity = $(if (@($grpRows | Where-Object { $_.Obiekt -like '*(adminCount=1)' }).Count) { 'High' } else { 'Medium' })
+        Title = 'Grupy, których właścicielem jest konto spoza administratorów'
+        Objects = (Get-OwnerAggregate $grpRows)
+        Detail = $grpRows
+        Description = 'Właściciel grupy może nadać sobie prawo zmiany członkostwa i dopisać do niej dowolne konto - a więc uzyskać wszystko, do czego grupa daje dostęp (udziały, aplikacje, delegacje w AD, dostęp do serwerów). Grupy z adminCount=1 były kiedyś chronione (uprzywilejowane) i często nadal nadają szerokie prawa - stąd wyższa waga. Grupy uprzywilejowane (Tier 0) ocenia P-ACL-TIER0.'
+        Recommendation = 'Zachować listę, a potem zmienić właściciela na Domain Admins. Zarządzanie członkostwem delegować przez atrybut managedBy lub wpis w uprawnieniach dla grupy administratorów aplikacji, a nie przez własność obiektu. Szczególnie sprawdzić grupy nadające prawa do serwerów i delegacje w AD.'
+        Fix = (Fx '$g = Get-ADGroup <grupa>; $acl = Get-Acl "AD:$($g.DistinguishedName)"',
+                  '$acl.SetOwner([System.Security.Principal.SecurityIdentifier]''{SID}-512''); Set-Acl -Path "AD:$($g.DistinguishedName)" -AclObject $acl')
+        Mitre = 'T1098'
+    }
+    # także konta wyłączone: właściciel może konto włączyć i przejąć
+    $usersO = @(Find-Ldap -SecurityDescriptor -OwnerOnly -Properties nTSecurityDescriptor, adminCount -Filter '(&(objectCategory=person)(objectClass=user))' |
+                Where-Object { -not ($_.SID -and $privBySid.ContainsKey($_.SID.Value)) })
+    $usrRows = @(& $collect $usersO { param($o) "$($o.samaccountname)$(if ([int]$o.admincount -eq 1) { ' (adminCount=1)' })$(if ([int]$o.useraccountcontrol -band 2) { ' (wyłączone)' })" })
+    Add-IfAny @{
+        Id = 'U-OWNER-USER'; Category = $catUser
+        Severity = $(if (@($usrRows | Where-Object { $_.Obiekt -like '*(adminCount=1)*' }).Count) { 'High' } else { 'Medium' })
+        Title = 'Konta użytkowników, których właścicielem jest konto spoza administratorów'
+        Objects = (Get-OwnerAggregate $usrRows)
+        Detail = $usrRows
+        Description = 'Właściciel konta może nadać sobie prawo resetu hasła lub zapisu atrybutów (np. msDS-KeyCredentialLink - shadow credentials, servicePrincipalName - celowany Kerberoasting) i zalogować się jako ten użytkownik. Konta oznaczone adminCount=1 były kiedyś uprzywilejowane i bywają nadal używane do administracji - stąd wyższa waga. Dotyczy to także kont wyłączonych (oznaczonych w kolumnie Przyklady) - właściciel może je włączyć. Konta uprzywilejowane ocenia P-ACL-TIER0.'
+        Recommendation = 'Zachować listę, a potem zmienić właściciela na Domain Admins; zmiana nie wpływa na logowanie użytkowników. Konta zakładać kontem administratora albo przez delegację nadaną grupie helpdesku (wpisy w uprawnieniach OU), a nie zostawiać własności zakładającym.'
+        Fix = (Fx '$u = Get-ADUser <konto>; $acl = Get-Acl "AD:$($u.DistinguishedName)"',
+                  '$acl.SetOwner([System.Security.Principal.SecurityIdentifier]''{SID}-512''); Set-Acl -Path "AD:$($u.DistinguishedName)" -AclObject $acl')
+        Mitre = 'T1098'
+    }
+    if ($cnt.NoSd) {
+        Add-Finding @{ Id = 'INFO-OWNER-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'
+                       Title = "Nie odczytano właściciela $($cnt.NoSd) obiektów (OU, GPO, grupy, konta)"
+                       Description = 'Brak uprawnienia do odczytu deskryptora zabezpieczeń - testy D-OWNER-OU, D-OWNER-GPO, P-OWNER-GROUP i U-OWNER-USER nie objęły tych obiektów.' }
     }
 }
 

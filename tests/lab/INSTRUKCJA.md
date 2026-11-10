@@ -94,6 +94,7 @@ W tabeli „Sprawdzone reguły” na końcu raportu każda reguła ma status. Sz
 | 22 | `lab-zwykly` z prawem edycji GPO „ADCheck-Lab DC edycja” podlinkowanego do OU Domain Controllers | D-ACL-GPO | wiersze z `LAB\lab-zwykly` dla obiektu w AD i katalogu SYSVOL tego GPO; waga High |
 | 23 | `lab-zwykly` z prawem zapisu na AdminSDHolder | D-ACL-ADMINSDHOLDER; P-ACL-TIER0 | D-ACL-ADMINSDHOLDER **Critical** z `LAB\lab-zwykly`. Po przebiegu SDProp `lab-zwykly` jest też w P-ACL-TIER0 (prawa do kont uprzywilejowanych) – jeśli nie ma, zanotuj, ile minut minęło od uruchomienia skryptu |
 | 24 | PSO „ADCheck-Lab PSO” (długość 4, bez złożoności) dla `lab-operatorzy` | D-FGPP-WEAK | waga **High**; kolumna Slabsze z długością 4 i wyłączoną złożonością; w kolumnie Uprzywilejowani `lab-operatorzy` |
+| 25 | `lab-zwykly` jest właścicielem OU „ADCheck-Lab Wlasciciel”, GPO „ADCheck-Lab LLMNR”, grupy `lab-wlasc-grupa`, konta `lab-wlasc-konto` i komputera `LAB-WLASC-PC` (**wymaga wersji 0.30 – sprawdzić w przebiegu F**) | D-OWNER-OU, D-OWNER-GPO, P-OWNER-GROUP, U-OWNER-USER, C-OWNER | w każdym znalezisku wiersz z właścicielem `LAB\lab-zwykly` i odpowiednim obiektem w kolumnie Przyklady; D-OWNER-OU i D-OWNER-GPO – waga **High**. Jeśli skrypt wypisał „Przypadek 25: nie ustawiono właściciela…”, zanotuj komunikat |
 | 10 | Nawigacja w raporcie | Macierz ryzyka | kliknięcie pola ze znaleziskami rozwija listę linków; link prowadzi do szczegółów; „↑ Macierz ryzyka” wraca na górę |
 
 ### Przebieg B (zwykłe konto)
@@ -162,6 +163,7 @@ Przebieg F sprawdza wersję rozwojową 0.30 (gałąź `main`, bez weryfikacji SH
 | F7 | W historii **nie ma** przeglądu klienta INNY ani pliku uszkodzonego; pod tabelą notka „Pominięte pliki JSON (uszkodzone lub z niezgodną wersją schematu): 1.” |
 | F8 | Najechanie kursorem na punkt wykresu pokazuje nazwę serii, wartość i datę |
 | F9 | Wydruk do PDF (Ctrl+P): wykresy widoczne i nieucięte |
+| F10 | Punkt 25 (właściciele obiektów) – przebieg F wykonuje się po `-Usun`, więc przed nim utwórz przypadki ponownie (`.\Lab-Scenariusze.ps1 -Domena lab.local`), uruchom przebieg F, a na końcu znowu `-Usun`. Wtedy w F10 sprawdź wynik 25 |
 
 ## 4. Co przekazać
 

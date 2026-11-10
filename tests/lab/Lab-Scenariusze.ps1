@@ -255,5 +255,24 @@ if (-not (Get-ADFineGrainedPasswordPolicy -Filter "Name -eq '$psoName'")) {
 }
 Add-ADFineGrainedPasswordPolicySubject $psoName -Subjects $gOps
 
+# --- Przypadek 25: zwykłe konto jako właściciel OU, GPO, grupy, konta i komputera (obiekty zakładane zwykłym kontem) ---
+$ouOwn = "OU=ADCheck-Lab Wlasciciel,$ouDn"
+if (-not (Get-ADOrganizationalUnit -Filter "distinguishedName -eq '$ouOwn'")) {
+    New-ADOrganizationalUnit -Name 'ADCheck-Lab Wlasciciel' -Path $ouDn -ProtectedFromAccidentalDeletion $false
+}
+if (-not (Get-ADGroup -Filter "sAMAccountName -eq 'lab-wlasc-grupa'")) {
+    New-ADGroup -Name 'lab-wlasc-grupa' -SamAccountName 'lab-wlasc-grupa' -GroupScope Global -Path $ouOwn
+}
+$uOwnTarget = New-LabUser 'lab-wlasc-konto'
+$cOwnTarget = New-LabComputer 'LAB-WLASC-PC' 'Windows 11 Pro' '10.0 (26100)'
+foreach ($dn in $ouOwn, (Get-ADGroup 'lab-wlasc-grupa').DistinguishedName, $uOwnTarget.DistinguishedName, $cOwnTarget.DistinguishedName,
+                "CN={$($gL.Id)},CN=Policies,CN=System,$($dom.DistinguishedName)") {
+    try {
+        $a = Get-Acl "AD:\$dn"
+        $a.SetOwner($uZw.SID)
+        Set-Acl "AD:\$dn" $a
+    } catch { Write-Host "Przypadek 25: nie ustawiono właściciela $dn - $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
 Write-Host 'Utworzono przypadki testowe. Oczekiwane wyniki: tests/lab/INSTRUKCJA.md.' -ForegroundColor Green
 Write-Host "Po testach: .\Lab-Scenariusze.ps1 -Domena $Domena -Usun" -ForegroundColor Yellow
