@@ -1,8 +1,8 @@
 # Laboratorium testowe ADCheck
 
-Instrukcja dla osoby, która sprawdza ADCheck na domenie testowej przed wydaniem wersji. Czas: około 4 godzin, w tym około 1 godziny na przygotowanie VM.
+Instrukcja dla osoby, która sprawdza ADCheck na domenie testowej przed wydaniem wersji. Czas: około 5 godzin, w tym około 1 godziny na przygotowanie VM.
 
-> **Tylko domena testowa.** Skrypt `Lab-Scenariusze.ps1` celowo psuje konfigurację AD: nadaje prawa replikacji, zmienia grupę podstawową konta i usuwa foldery GPO z SYSVOL. Nigdy nie uruchamiaj go w domenie, z której ktoś korzysta. Sam ADCheck niczego nie zmienia.
+> **Tylko domena testowa.** Skrypt `Lab-Scenariusze.ps1` celowo psuje konfigurację AD: nadaje prawa replikacji, zmienia grupę podstawową konta, usuwa foldery GPO z SYSVOL, ustawia delegację (także RBCD na koncie DC), dodaje wpis na AdminSDHolder, zapisuje fikcyjne hasła GPP i włącza konto Gość. Nigdy nie uruchamiaj go w domenie, z której ktoś korzysta. Sam ADCheck niczego nie zmienia.
 
 ## 1. Przygotowanie domeny testowej
 
@@ -49,8 +49,8 @@ Kolejność kroków:
    .\Lab-Scenariusze.ps1 -Domena lab.local
    ```
 
-3. Przebiegi A, B i C.
-4. Usuń przypadki testowe: `.\Lab-Scenariusze.ps1 -Domena lab.local -Usun`
+3. Odczekaj 2 minuty (skrypt uruchamia przebieg SDProp – przypadek 23), potem przebiegi A, B i C.
+4. Usuń przypadki testowe: `.\Lab-Scenariusze.ps1 -Domena lab.local -Usun` i odczekaj 2 minuty przed przebiegiem D. `-Usun` wyłącza też konto Gość.
 5. Przebiegi D i E.
 6. Przebieg F – przygotowanie i polecenie w sekcji „Przebieg F” poniżej.
 
@@ -78,7 +78,22 @@ W tabeli „Sprawdzone reguły” na końcu raportu każda reguła ma status. Sz
 | 7 | Przegląd uruchomiony kontem Administrator | Znalezisko P-ADMLOGIN | opis kończy się zdaniem, że data logowania może pochodzić z samego przeglądu |
 | 8 | Brak LAPS w domenie | C-LAPS-NONE | waga High; zanotuj wariant tytułu („brak atrybutów LAPS w schemacie” albo „schemat rozszerzony, żaden komputer nie ma hasła LAPS”) |
 | 9 | Porównanie z przebiegiem 0 | Sekcja „Porównanie z poprzednim przeglądem” | nowe znaleziska: m.in. D-DCSYNC, D-GPO-SYNC, D-GPO-DEADLINK; wiersz „Nowe znaleziska Critical: D-DCSYNC”; brak ostrzeżenia o innym trybie; brak błędu wczytania pliku. Jeśli zniknęło znalezisko, którego skrypt nie dotyczy (np. D-BACKUP), zanotuj, co zmieniłeś w domenie między przebiegami |
-| 9a | jw. | Karta „Zmiana od …” obok wyniku | dopisek „klasa ekspozycji D → E” (lub inna zmiana klasy) i „nowe Critical: 1”; karta z czerwonym paskiem |
+| 9a | jw. | Karta „Zmiana od …” obok wyniku | dopisek „klasa ekspozycji D → E” (lub inna zmiana klasy) i „nowe Critical: N”, gdzie N ≥ 4 (m.in. D-DCSYNC, D-GPP-PASSWORD, DC-RBCD, D-ACL-ADMINSDHOLDER – lista w sekcji porównania); karta z czerwonym paskiem |
+| 11 | `lab-asrep` bez preautentykacji Kerberos | U-ASREP | `lab-asrep` na liście |
+| 12 | `lab-svc` z SPN i nowym hasłem | U-SPN; U-SPN-WEAK | `lab-svc` w U-SPN; **nie** występuje w U-SPN-WEAK (hasło nowe) |
+| 12a | `lab-pgid512` (administrator domeny) z SPN | P-SPN; P-DELEG | `lab-pgid512` w obu znaleziskach; P-SPN ma wagę High |
+| 13 | `lab-flagi`: hasło niewymagane, odwracalne szyfrowanie, tylko DES | U-PWDNOTREQ, U-REVERSIBLE, U-DES, D-KRB-DES | `lab-flagi` w każdym z czterech znalezisk. W U-PWDNOTREQ może być też konto Guest (przypadek 21) |
+| 14 | `lab-deleg` z delegacją nieograniczoną | U-UNCONSTR | `lab-deleg` na liście |
+| 15 | `lab-admincount` z adminCount=1 poza grupami uprzywilejowanymi | U-ADMINCOUNT | `lab-admincount` na liście; **nie ma** tam `lab-backup` ani `lab-pgid512` (są uprzywilejowani) |
+| 16 | Komputer `LAB-SRV2008` (Windows Server 2008 R2, delegacja nieograniczona) | C-OS-EOL; C-UNCONSTR | `LAB-SRV2008` w obu znaleziskach |
+| 17 | Komputer `LAB-W10` (Windows 10 Pro 22H2) z RBCD dla `LAB-SRV2008` | C-OS-W10; C-RBCD | `LAB-W10` w C-OS-W10; w C-RBCD wiersz Cel `LAB-W10$`, Podmiot `LAB\LAB-SRV2008$`, waga Low |
+| 18 | RBCD na koncie DC dla `LAB-SRV2008` | DC-RBCD | waga **Critical**, wiersz z nazwą DC i podmiotem `LAB\LAB-SRV2008$`. Jeśli skrypt wypisał „Przypadek 18 pominięty”, zanotuj to i pomiń ten punkt |
+| 19 | `lab-backup` w Backup Operators przez grupę `lab-operatorzy` | P-BackupOperators; Załącznik A | `lab-backup` w znalezisku (członkostwo rekursywne) i w Załączniku A przy Backup Operators |
+| 20 | Hasła GPP w GPO „ADCheck-Lab GPP” (wartości fikcyjne) | D-GPP-PASSWORD; D-GPO-UNLINKED | D-GPP-PASSWORD **Critical**, dwa wiersze: cpassword (konto `lab-lokalny`) i DefaultPassword; raport **nie** zawiera wartości haseł. „ADCheck-Lab GPP” jest też w D-GPO-UNLINKED |
+| 21 | Konto Gość włączone | U-GUEST | znalezisko występuje |
+| 22 | `lab-zwykly` z prawem edycji GPO „ADCheck-Lab DC edycja” podlinkowanego do OU Domain Controllers | D-ACL-GPO | wiersze z `LAB\lab-zwykly` dla obiektu w AD i katalogu SYSVOL tego GPO; waga High |
+| 23 | `lab-zwykly` z prawem zapisu na AdminSDHolder | D-ACL-ADMINSDHOLDER; P-ACL-TIER0 | D-ACL-ADMINSDHOLDER **Critical** z `LAB\lab-zwykly`. Po przebiegu SDProp `lab-zwykly` jest też w P-ACL-TIER0 (prawa do kont uprzywilejowanych) – jeśli nie ma, zanotuj, ile minut minęło od uruchomienia skryptu |
+| 24 | PSO „ADCheck-Lab PSO” (długość 4, bez złożoności) dla `lab-operatorzy` | D-FGPP-WEAK | waga **High**; kolumna Slabsze z długością 4 i wyłączoną złożonością; w kolumnie Uprzywilejowani `lab-operatorzy` |
 | 10 | Nawigacja w raporcie | Macierz ryzyka | kliknięcie pola ze znaleziskami rozwija listę linków; link prowadzi do szczegółów; „↑ Macierz ryzyka” wraca na górę |
 
 ### Przebieg B (zwykłe konto)
@@ -87,7 +102,7 @@ W tabeli „Sprawdzone reguły” na końcu raportu każda reguła ma status. Sz
 |---|---|
 | B1 | Nagłówek raportu: „Konto: LAB\lab-zwykly”, a przy `runas /netonly` – „Uruchomił: <konto lokalne> … Konto LDAP: LAB\lab-zwykly”; w obu wariantach bez dopisku „(konto uprzywilejowane)” |
 | B2 | DC-NETSESSION ma status inny niż „Pominięty (konto uprzywilejowane)” |
-| B3 | Wyniki 1–6 takie same jak w przebiegu A (D-DCSYNC, `lab-pgid512`, D-GPO-LLMNR, D-GPO-SYNC, notka DC-CIS) |
+| B3 | Wyniki 1–6 i 11–23 takie same jak w przebiegu A (D-DCSYNC, `lab-pgid512`, D-GPO-LLMNR, D-GPO-SYNC, notka DC-CIS, flagi kont, delegacje, RBCD, GPP, ACL). Wynik 24 (PSO) – patrz B5 |
 | B4 | Brak dopisku o przeglądzie kontem Administrator w P-ADMLOGIN (o ile znalezisko występuje) |
 | B5 | Brak reguł ze statusem „Błąd testu”. Oczekiwane: D-FGPP-WEAK „Pominięty (kontener PSO niewidoczny dla konta przeglądu)” i trzy reguły „Wymaga -UseWinRM”. Zanotuj każdy inny status „Pominięty”, „Błąd testu” lub „Nierozstrzygnięty” wraz z przyczyną |
 | B6 | Nazwy grup w DC-CIS-RIGHTS mogą być w języku systemu stacji (np. „BUILTIN\Administratorzy”) – to nie błąd; zanotuj język stacji |
@@ -104,8 +119,8 @@ W tabeli „Sprawdzone reguły” na końcu raportu każda reguła ma status. Sz
 
 | Nr | Oczekiwany wynik |
 |---|---|
-| D1 | „Porównanie z poprzednim przeglądem”: D-DCSYNC, D-GPO-SYNC i D-GPO-DEADLINK na liście usuniętych (naprawionych) |
-| D2 | `lab-pgid512` i pozostałe konta `lab-*` nie występują w raporcie |
+| D1 | „Porównanie z poprzednim przeglądem”: na liście usuniętych (naprawionych) m.in. D-DCSYNC, D-GPO-SYNC, D-GPO-DEADLINK, U-ASREP, U-DES, DC-RBCD, C-RBCD, D-GPP-PASSWORD, U-GUEST, D-ACL-GPO, D-ACL-ADMINSDHOLDER, D-FGPP-WEAK |
+| D2 | Konta `lab-*`, grupy `lab-*` i komputery `LAB-SRV2008`, `LAB-W10` nie występują w raporcie; `lab-zwykly` nie występuje w P-ACL-TIER0 |
 | D3 | Brak ostrzeżenia o innym trybie (przebiegi A i D wykonano w tym samym trybie) |
 
 ### Przebieg E (porównanie z przebiegiem w innym trybie)
