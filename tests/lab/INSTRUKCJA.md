@@ -37,6 +37,7 @@ Do kolejnych przebiegów dopisuj parametry na końcu (np. `-Previous <plik.json>
 | C | Po przebiegu B | LAB\Administrator na DC | `-Klient LAB -UseWinRM` |
 | D | Po `-Usun` | LAB\Administrator na DC | `-Klient LAB -Previous <JSON z przebiegu A>` |
 | E | Po przebiegu D | LAB\Administrator na DC | `-Klient LAB -Previous <JSON z przebiegu C>` |
+| F | Po przebiegu E, **wersja 0.30 z gałęzi `main`** | LAB\Administrator na DC | `-Client LAB -History` |
 
 Kolejność kroków:
 
@@ -51,6 +52,7 @@ Kolejność kroków:
 3. Przebiegi A, B i C.
 4. Usuń przypadki testowe: `.\Lab-Scenariusze.ps1 -Domena lab.local -Usun`
 5. Przebiegi D i E.
+6. Przebieg F – przygotowanie i polecenie w sekcji „Przebieg F” poniżej.
 
 Bez stacji Windows 11 przebieg B można wykonać z dowolnego komputera z Windows w tej samej sieci:
 `runas /netonly /user:LAB\lab-zwykly powershell`, a w nowym oknie dopisać do polecenia `-Server lab.local`.
@@ -111,6 +113,40 @@ W tabeli „Sprawdzone reguły” na końcu raportu każda reguła ma status. Sz
 | Nr | Oczekiwany wynik |
 |---|---|
 | E1 | „Porównanie z poprzednim przeglądem” zaczyna się od ostrzeżenia „poprzedni przegląd wykonano w innym trybie (testy DC: …)”; to samo ostrzeżenie na konsoli (żółte) |
+
+### Przebieg F (wersja 0.30: `-History`, `-Client`)
+
+Przebieg F sprawdza wersję rozwojową 0.30 (gałąź `main`, bez weryfikacji SHA256). Przygotowanie na DC:
+
+1. W katalogu `%USERPROFILE%\ADCheck\raporty` muszą być raporty JSON z przebiegów 0, A, C, D i E. Skopiuj tam też JSON z przebiegu B (powstał na stacji, z której go uruchomiłeś).
+2. Dodaj dwa pliki kontrolne – raport „innego klienta” i plik uszkodzony:
+
+   ```powershell
+   cd $env:USERPROFILE\ADCheck\raporty
+   $src = Get-ChildItem AD_LAB_lab.local_*.json | Sort-Object Name | Select-Object -First 1
+   (Get-Content $src.FullName -Raw -Encoding UTF8) -replace '"Klient":\s*"LAB"', '"Klient": "INNY"' | Set-Content AD_INNY_lab.local_20000101-0000.json -Encoding UTF8
+   Set-Content AD_LAB_lab.local_20000101-0001.json 'to nie jest JSON'
+   ```
+
+3. Uruchom (z dowolnego katalogu):
+
+   ```powershell
+   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/ADCheck/main/ADCheck.ps1).TrimStart([char]0xFEFF))) -Client LAB -History
+   ```
+
+4. Po przebiegu usuń oba pliki kontrolne (`AD_INNY_*` i `AD_LAB_lab.local_20000101-0001.json`).
+
+| Nr | Oczekiwany wynik |
+|---|---|
+| F1 | Parametr `-Client` przyjęty (brak błędu o brakującym `-Klient`); nagłówek raportu: ADCheck 0.30, klient LAB |
+| F2 | Konsola: żółty komunikat „-History: przeglądy w historii: 7, pominięte pliki (niezgodne lub uszkodzone): 1” (6 wcześniejszych przebiegów + bieżący; więcej, jeśli w katalogu są dodatkowe raporty LAB – zanotuj liczbę) |
+| F3 | Sekcja „Historia przeglądów” (pod „Porównaniem…” lub pod zakresem oceny): wykres wyniku z liniami czterech obszarów i szarym pasmem wyniku ogólnego, legenda nad wykresem |
+| F4 | Przebiegi B (konto `lab-zwykly`) i C (`-UseWinRM`) mają na wykresie pusty (biały) znacznik, a w tabeli dopisek „(inny tryb)”; pozostałe – pełny znacznik |
+| F5 | Wykres „Zgodność konfiguracji DC” ma punkty dla wszystkich przebiegów; wartość w przebiegu C wyraźnie różni się od sąsiednich (inne źródło danych) |
+| F6 | Tabela pod wykresami: najnowszy przegląd na górze z dopiskiem „(bieżący)”; wynik, klasa i liczby Critical/High/Medium/Low w każdym wierszu zgadzają się z kartami w raportach poszczególnych przebiegów |
+| F7 | W historii **nie ma** przeglądu klienta INNY ani pliku uszkodzonego; pod tabelą notka „Pominięte pliki JSON (uszkodzone lub z niezgodną wersją schematu): 1.” |
+| F8 | Najechanie kursorem na punkt wykresu pokazuje nazwę serii, wartość i datę |
+| F9 | Wydruk do PDF (Ctrl+P): wykresy widoczne i nieucięte |
 
 ## 4. Co przekazać
 

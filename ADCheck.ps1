@@ -5149,7 +5149,7 @@ if ($History) {
             [void]$sb.Append("<td>$($q.Wynik)</td><td>$(HtmlEnc $q.Klasa)</td><td>$($q.Critical)</td><td>$($q.High)</td><td>$($q.Medium)</td><td>$($q.Low)</td><td>$(& $pctTxt $q.CIS)</td><td>$(& $pctTxt $q.MS)</td></tr>")
         }
         [void]$sb.Append('</table>')
-        if ($historySkipped) { [void]$sb.Append("<p class=`"note`">Pominięto $historySkipped plików JSON (uszkodzone lub z niezgodną wersją schematu).</p>") }
+        if ($historySkipped) { [void]$sb.Append("<p class=`"note`">Pominięte pliki JSON (uszkodzone lub z niezgodną wersją schematu): $historySkipped.</p>") }
     }
     [void]$sb.Append('</section>')
 }
