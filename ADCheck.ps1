@@ -51,7 +51,45 @@ param(
     [switch]$Silent,
     [switch]$History,
     [ValidateRange(2, 500)][int]$MaxHistoryPoints = 24,
+    [ArgumentCompleter({
+        # TAB: nazwy testów i Id reguł z katalogu reguł w tym pliku (plik jest tylko czytany, przegląd się nie uruchamia)
+        $cmd = Get-Command $args[0] -ErrorAction SilentlyContinue
+        if (-not $cmd -or -not $cmd.Path -or -not (Test-Path -LiteralPath $cmd.Path)) { return }
+        $word = "$($args[2])".Trim("'", '"')
+        $tests = [ordered]@{}; $rules = [ordered]@{}
+        foreach ($l in [System.IO.File]::ReadAllLines($cmd.Path)) {
+            if ($l -notmatch "^\s*@\{ Id = '([^']+)'") { continue }
+            $id = $Matches[1]
+            $t = if ($l -match "T = '([^']+)'") { $Matches[1] } else { $id }
+            if ($l -match "C = '([^']+)'" -and -not $tests.Contains($Matches[1])) { $tests[$Matches[1]] = "test $($Matches[1])" }
+            $rules[$id] = "$id - $t"
+        }
+        foreach ($set in $tests, $rules) {
+            foreach ($k in @($set.Keys | Sort-Object)) {
+                if ($k -like "$word*") { [System.Management.Automation.CompletionResult]::new($k, $k, 'ParameterValue', $set[$k]) }
+            }
+        }
+    })]
     [string[]]$IncludeCheck,
+    [ArgumentCompleter({
+        # TAB: nazwy testów i Id reguł z katalogu reguł w tym pliku (plik jest tylko czytany, przegląd się nie uruchamia)
+        $cmd = Get-Command $args[0] -ErrorAction SilentlyContinue
+        if (-not $cmd -or -not $cmd.Path -or -not (Test-Path -LiteralPath $cmd.Path)) { return }
+        $word = "$($args[2])".Trim("'", '"')
+        $tests = [ordered]@{}; $rules = [ordered]@{}
+        foreach ($l in [System.IO.File]::ReadAllLines($cmd.Path)) {
+            if ($l -notmatch "^\s*@\{ Id = '([^']+)'") { continue }
+            $id = $Matches[1]
+            $t = if ($l -match "T = '([^']+)'") { $Matches[1] } else { $id }
+            if ($l -match "C = '([^']+)'" -and -not $tests.Contains($Matches[1])) { $tests[$Matches[1]] = "test $($Matches[1])" }
+            $rules[$id] = "$id - $t"
+        }
+        foreach ($set in $tests, $rules) {
+            foreach ($k in @($set.Keys | Sort-Object)) {
+                if ($k -like "$word*") { [System.Management.Automation.CompletionResult]::new($k, $k, 'ParameterValue', $set[$k]) }
+            }
+        }
+    })]
     [string[]]$ExcludeCheck
 )
 

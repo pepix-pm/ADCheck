@@ -41,7 +41,7 @@ clear
 | `-UseWinRM` | Testy DC na podstawie rzeczywistej konfiguracji (rejestr, `auditpol`, dziennik Security) odczytanej przez WinRM; wymaga członkostwa w grupie Administrators domeny |
 | `-SkipDCChecks` | Pomija testy kontrolerów domeny |
 | `-MaxHistoryPoints` | Największa liczba przeglądów w sekcji „Historia przeglądów” – najnowsze, razem z bieżącym (domyślnie 24; od v0.31) |
-| `-IncludeCheck`, `-ExcludeCheck` | Tylko wskazane testy albo wszystkie poza wskazanymi – np. szybki ponowny test po naprawie. Nazwa testu (`ADCS`, `PRIV`, `DC-PROBE`, …; pełna lista: `-ListChecks`) lub Id reguły (`D-ADCS-ESC1` uruchamia cały test `ADCS`). Przegląd częściowy jest oznaczony w raporcie, nie trafia do historii, a jego wyniku nie należy porównywać z pełnym (od v0.31) |
+| `-IncludeCheck`, `-ExcludeCheck` | Tylko wskazane testy albo wszystkie poza wskazanymi – np. szybki ponowny test po naprawie. Nazwa testu (`ADCS`, `PRIV`, `DC-PROBE`, …; pełna lista: `-ListChecks`) lub Id reguły (`D-ADCS-ESC1` uruchamia cały test `ADCS`); przy uruchomieniu z pliku (`.\ADCheck.ps1`) nazwy podpowiada klawisz TAB. Przegląd częściowy jest oznaczony w raporcie, nie trafia do historii, a jego wyniku nie należy porównywać z pełnym (od v0.31) |
 | `-ListChecks` | Wypisuje testy i reguły (kolumny Test, Regula, Wymaga, Opis) i kończy – bez połączenia z domeną i bez `-Client`; kolumna Test to nazwa do `-IncludeCheck` / `-ExcludeCheck` (od v0.31) |
 | `-MaxRows` | Maksymalna liczba obiektów na znalezisko w HTML (domyślnie 500; pełna lista w CSV) |
 | `-Silent` | Bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików (do automatyzacji) |

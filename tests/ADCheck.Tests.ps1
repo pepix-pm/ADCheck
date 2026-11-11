@@ -843,3 +843,20 @@ Describe 'Raport z danych przykładowych (HTML, JSON, CSV)' {
         $csv.Contains('_Id=') | Should -BeFalse
     }
 }
+
+Describe 'Podpowiedzi TAB dla -IncludeCheck / -ExcludeCheck' {
+    It 'podpowiada nazwy testów i Id reguł z katalogu reguł' {
+        $cmd = Get-Command $scriptPath
+        foreach ($p in 'IncludeCheck', 'ExcludeCheck') {
+            $attr = $cmd.Parameters[$p].Attributes | Where-Object { $_ -is [System.Management.Automation.ArgumentCompleterAttribute] }
+            $attr | Should -Not -BeNullOrEmpty
+            $all = @(& $attr.ScriptBlock $scriptPath $p '' $null @{})
+            $all.CompletionText | Should -Contain 'ADCS'
+            $all.CompletionText | Should -Contain 'DC-PROBE'
+            $all.CompletionText | Should -Contain 'D-ADCS-ESC1'
+            $r = @(& $attr.ScriptBlock $scriptPath $p 'D-ADCS-ESC1' $null @{})
+            $r.CompletionText | Should -Contain 'D-ADCS-ESC10'
+            @($r | Where-Object { $_.CompletionText -notlike 'D-ADCS-ESC1*' }).Count | Should -Be 0
+        }
+    }
+}
