@@ -147,10 +147,10 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | DC-RBCD | Critical | RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity) ustawione na koncie kontrolera domeny | T1558 |
 | D-KCD-DC | Critical / High | Delegacja ograniczona do usług DC (Critical przy przejściu protokołu na aktywnym koncie) | T1558 |
 | P-GMSA-READ | Critical / High | Hasło gMSA może pobrać szeroka grupa (Domain Users, Domain Computers…) albo gMSA jest w grupie uprzywilejowanej, a hasło pobierają serwery spoza Tier 0 (Critical przy obu warunkach naraz) | T1552 |
-| D-ADCS-ESC1 | Critical / High | Opublikowany szablon: nazwa podmiotu z żądania + EKU do logowania, bez zatwierdzania, z prawem Enroll dla kont i grup spoza administratorów (Critical dla szerokich grup) | T1649 |
+| D-ADCS-ESC1 | Critical / High / Low | Opublikowany szablon: nazwa podmiotu z żądania + EKU do logowania, bez zatwierdzania, z prawem Enroll dla kont i grup spoza administratorów (Critical dla szerokich grup; Low, gdy szablon jest opublikowany tylko na wycofanym CA – tak samo ESC2, 3, 4 i 9) | T1649 |
 | D-ADCS-ESC3 | Critical / High | Szablon agenta rejestracji (Certificate Request Agent) dostępny dla kont i grup spoza administratorów | T1649 |
 | D-ADCS-ESC4 | Critical / High | Konta i grupy spoza administratorów mogą zmieniać opublikowany szablon (pełna kontrola, WriteDacl, WriteOwner, zapis, właściciel) | T1649 |
-| D-ADCS-ESC5 | Critical / High | Prawa zapisu kont i grup spoza administratorów do kontenerów i obiektów PKI (NTAuthCertificates, obiekt CA, szablony, OID) lub do konta komputera serwera CA | T1649 |
+| D-ADCS-ESC5 | Critical / High / Low | Prawa zapisu kont i grup spoza administratorów do kontenerów i obiektów PKI (NTAuthCertificates, obiekt CA, szablony, OID) lub do konta komputera serwera CA; Low, gdy dotyczą tylko podmiotów usuniętych z AD lub obiektów wycofanego CA | T1649 |
 | D-ADCS-ESC13 | Critical / High | Szablon z zasadą wystawiania powiązaną z grupą (msDS-OIDToGroupLink) dostępny dla kont i grup spoza administratorów (Critical dla grupy uprzywilejowanej) | T1649 |
 | D-ADCS-ORPHAN | High / Medium | CA wycofane (brak, wyłączone lub nieużywane konto serwera), ale nadal zarejestrowane w AD; High, gdy certyfikat CA jest w NTAuthCertificates | T1649 |
 | D-ADCS-ESC2 | High / Medium | Szablon z EKU Any Purpose lub bez EKU dostępny dla kont i grup spoza administratorów | T1649 |
@@ -171,7 +171,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | P-GPCO | Low | Konta spoza administratorów w Group Policy Creator Owners | T1484.001 |
 | P-DELEG | Medium | Konta uprzywilejowane bez ochrony przed delegacją | T1558 |
 | P-STALE | Medium | Nieużywane aktywne konta uprzywilejowane | T1078.002 |
-| P-ADM500 | Medium | Wiek hasła wbudowanego Administratora | T1078.002 |
+| P-ADM500 | Medium / Low | Wiek hasła wbudowanego Administratora (Low, gdy konto jest wyłączone) | T1078.002 |
 | P-ADMLOGIN | Medium | Wbudowane konto Administrator używane w ostatnich 35 dniach | T1078.002 |
 | P-PROTECTED | Low | Konta uprzywilejowane spoza Protected Users (bez kont z SPN i RID 500) | T1550.002 |
 | P-ADMINMAIL | Low | Konta uprzywilejowane z adresem e-mail | T1566 |

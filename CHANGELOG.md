@@ -25,6 +25,9 @@
 - Reguła z wymaganiem `-UseWinRM`, która nie dotyczy domeny (np. D-ADCS-ESC10 bez AD CS), ma status „Nie dotyczy” zamiast „Wymaga -UseWinRM”.
 - DC-TIME-SOURCE: przy przeglądzie uruchomionym na samym PDC źródło czasu jest odczytywane lokalnie z `w32tm /query /source`, także bez `-UseWinRM`.
 - Załącznik B (metodyka): AD CS – rejestr DC (ESC10) oceniany z `-UseWinRM`.
+- Wagi pozostałości po wycofanym AD CS: szablony ESC1/2/3/4/9 opublikowane wyłącznie na wycofanych CA mają wagę Low (wcześniej o jeden stopień niżej niż zwykle, np. High dla ESC1) - certyfikatu nie da się dziś z nich pobrać, a ryzyko klucza CA opisuje D-ADCS-ORPHAN. D-ADCS-ESC5 ma wagę Low, gdy jedyne wpisy dotyczą podmiotów usuniętych z AD (SID nierozwiązany) lub obiektów wycofanych CA.
+- P-ADM500: wyłączone konto Administrator ze starym hasłem - Low (wcześniej Medium), z dopiskiem w opisie.
+- D-GPO-LLMNR, D-GPO-PSLOG: status „Nierozstrzygnięty” tylko wtedy, gdy nieczytelne GPO jest podlinkowane do domeny, lokacji albo OU z aktywnymi kontami komputerów. GPO nieczytelne podlinkowane wyłącznie do OU z użytkownikami nie blokuje już oceny (nadal jest w INFO-GPO-READ).
 - JSON (`SchemaVersion` 1.3): nowe pola `Porownanie.Obiekty`, `Meta.Czesciowy`, `Meta.TestyWybrane`, `Meta.PokrycieObszarow`, `Pewnosc` i `PewnoscUwagi` w znaleziskach, `_Id` w wierszach kont i komputerów.
 - Testy: warstwa raportu (HTML, JSON, CSV) generowana w CI z fikcyjnych danych (`tests/fixtures/znaleziska.json`) – kodowanie znaków specjalnych, ukryte kolumny, wersja schematu, statusy reguł.
 - README, sekcja Ograniczenia: aktualny opis oceny GPO i ESC10.

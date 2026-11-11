@@ -1521,6 +1521,8 @@ function Get-DcGpoPolicy {
 # Kolumna Domena: GPO podlinkowane do korzenia domeny (obejmuje wszystkie komputery, o ile nie blokuje go OU lub filtr);
 # Zakres: miejsca podlinkowania. GPO nieczytelne dla konta przeglądu trafiają do $gpoAllUnread.
 $gpoAllUnread = [System.Collections.Generic.List[string]]::new()
+$gpoUnreadComp = [System.Collections.Generic.List[string]]::new()   # nieczytelne GPO, które mogą obejmować komputery (domena, lokacja, OU z komputerami)
+$ouHasComputer = @{}
 $gpoUnreadWhere = @{}   # DN GPO (małe litery) -> miejsca podlinkowania, do INFO-GPO-READ
 function Get-LinkedGpoRegistry {
     $links = @{}
@@ -1547,6 +1549,15 @@ function Get-LinkedGpoRegistry {
         if ($stale) { continue }
         if (-not $gpo -or -not $gpo.gpcfilesyspath) {
             $gpoAllUnread.Add($dn)
+            $forComp = @($links[$dn] | Where-Object {
+                $h = "$_"
+                if ($h -ieq $domainDn -or $h -like "*,CN=Sites,$configDn") { return $true }
+                if (-not $ouHasComputer.ContainsKey($h)) {
+                    $ouHasComputer[$h] = $(try { [bool]@(Find-Ldap -SearchBase $h -Filter '(&(objectCategory=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))' | Select-Object -First 1).Count } catch { $true })
+                }
+                $ouHasComputer[$h]
+            }).Count
+            if ($forComp) { $gpoUnreadComp.Add($dn) }
             $gpoUnreadWhere[$dn] = (@($links[$dn] | ForEach-Object { if ($_ -ieq $domainDn) { 'domena' } else { $_ } }) | Sort-Object -Unique) -join '; '
             continue
         }
@@ -1853,10 +1864,10 @@ Invoke-Check 'PRIV' {
     $adm = Get-LdapObject -Identity "$dSid-500"
     if ($adm.PasswordLastSet -and $adm.PasswordLastSet -lt $now.AddDays(-365)) {
         Add-Finding @{
-            Id = 'P-ADM500'; Category = $catPriv; Severity = 'Medium'
+            Id = 'P-ADM500'; Category = $catPriv; Severity = $(if ($adm.Enabled) { 'Medium' } else { 'Low' })
             Title = "Hasło wbudowanego Administratora nie zmieniane od $([int]($now - $adm.PasswordLastSet).TotalDays) dni"
             Objects = (ConvertTo-UserRow $adm)
-            Description = 'Wbudowane konto Administrator (RID 500) nie podlega blokadzie po błędnych hasłach i często ma hasło znane wielu osobom z przeszłości.'
+            Description = 'Wbudowane konto Administrator (RID 500) nie podlega blokadzie po błędnych hasłach i często ma hasło znane wielu osobom z przeszłości.' + $(if (-not $adm.Enabled) { ' Konto jest wyłączone, więc ryzyko jest niskie, dopóki ktoś go nie włączy - wtedy stare hasło znów działa.' } else { '' })
             Recommendation = 'Zmienić hasło na długie losowe, przechować w sejfie haseł, używać tylko awaryjnie.'
             Fix = (Fx 'Set-ADAccountPassword -Identity ''{SID}-500'' -Reset')
             Mitre = 'T1078.002'
@@ -3129,7 +3140,10 @@ Invoke-Check 'ADCS' {
     if ($caOrphan.Count -eq $cas.Count) { foreach ($n in 6, 7, 8, 11) { $ruleNote["D-ADCS-ESC$n"] = 'Nie dotyczy (tylko wycofane CA)' } }
 
     # Szablon opublikowany wyłącznie na wycofanym CA nie daje dziś certyfikatu - bez najwyższej wagi (ryzyko opisuje D-ADCS-ORPHAN)
-    $sevOf = { param($Rows, [string]$Hi, [string]$Lo) if (@($Rows | Where-Object { $_.Szerokie -and -not $_.TylkoWycofaneCA }).Count) { $Hi } else { $Lo } }
+    # Szablony opublikowane wyłącznie na wycofanych CA: Low - nikt nie pobierze dziś z nich certyfikatu, a ryzyko klucza CA opisuje D-ADCS-ORPHAN
+    $sevOf = { param($Rows, [string]$Hi, [string]$Lo)
+        $live = @($Rows | Where-Object { -not $_.TylkoWycofaneCA })
+        if (@($Rows).Count -and -not $live.Count) { 'Low' } elseif (@($live | Where-Object Szerokie).Count) { $Hi } else { $Lo } }
     $show  = { param($Rows) $Rows | Select-Object * -ExcludeProperty Szerokie }
     $verify = 'certutil -v -dstemplate <szablon>   # flagi i EKU szablonu'
     $unpub  = 'certutil -config "<serwer CA>\<nazwa CA>" -SetCATemplates -<szablon>   # zdjęcie szablonu z CA, jeśli zbędny'
@@ -3241,10 +3255,14 @@ Invoke-Check 'ADCS' {
         Mitre = 'T1649'
     }
     Add-IfAny @{
-        Id = 'D-ADCS-ESC5'; Category = $catPki; Severity = $(if (@($esc5 | Where-Object { $broad.ContainsKey($_.SID) }).Count) { 'Critical' } else { 'High' })
+        Id = 'D-ADCS-ESC5'; Category = $catPki
+        Severity = $(
+            # pozostałość: podmiot usunięty z AD (nikt nie może się nim uwierzytelnić) albo obiekt wycofanego CA
+            $live5 = @($esc5 | Where-Object { "$($_.Czlonkowie)" -notlike '(SID nierozwiązany*' -and "$($_.Obiekt)" -notlike '*(CA wycofane)' })
+            if (-not $live5.Count) { 'Low' } elseif (@($live5 | Where-Object { $broad.ContainsKey($_.SID) }).Count) { 'Critical' } else { 'High' })
         Title = 'Nie-administratorzy z prawami do obiektów PKI lub serwerów CA (ESC5)'
         Objects = $esc5
-        Description = 'Prawo zapisu do kontenerów i obiektów PKI w AD (np. NTAuthCertificates, obiekt CA, kontener szablonów) albo do konta komputera serwera CA pozwala dodać zaufane CA, opublikować własny szablon lub przejąć serwer CA i wystawiać certyfikaty dowolnym kontom. Serwer CA i jego obiekty w AD należą do Tier 0, tak jak kontrolery domeny.'
+        Description = 'Prawo zapisu do kontenerów i obiektów PKI w AD (np. NTAuthCertificates, obiekt CA, kontener szablonów) albo do konta komputera serwera CA pozwala dodać zaufane CA, opublikować własny szablon lub przejąć serwer CA i wystawiać certyfikaty dowolnym kontom. Serwer CA i jego obiekty w AD należą do Tier 0, tak jak kontrolery domeny. Wpisy dla podmiotów usuniętych z AD (kolumna Czlonkowie: SID nierozwiązany) i dla obiektów wycofanych CA są pozostałościami o niskim ryzyku - gdy są jedynymi wpisami, waga jest Low.'
         Recommendation = 'Usunąć zbędne prawa; właścicielem obiektów PKI i konta serwera CA powinni być administratorzy domeny lub lasu. Wpisy, których nikt nie potrafi wyjaśnić, traktować jako możliwy incydent.'
         Fix = (Fx 'dsacls "<DN obiektu>"   # pełna lista uprawnień', 'dsacls "<DN obiektu>" /R "<DOMENA>\<podmiot>"   # po weryfikacji')
         Mitre = 'T1649'
@@ -4199,13 +4217,13 @@ if (-not $SkipDCChecks) {
                       $ruleNote[$Id] = "Zaliczony warunkowo (GPO domeny z ustawieniem ma ograniczony zakres: $((@($dom | ForEach-Object { "$($_.Gpo) - $($_.Filtr)" }) | Sort-Object -Unique) -join '; ') - sprawdzić, czy obejmuje wszystkie komputery)"
                   } elseif ($full.Count -and $blockOus.Count -and -not @($full | Where-Object Wymuszone).Count) {
                       $ruleNote[$Id] = "Zaliczony warunkowo (OU z komputerami blokujące dziedziczenie: $((@($blockOus | Select-Object -First 5) -join ', '))$(if ($blockOus.Count -gt 5) { " (+$($blockOus.Count - 5))" }); łącze GPO do domeny nie jest wymuszone - sprawdzić, czy ustawienie obejmuje te OU)"
-                  } elseif (-not @($Ok).Count -and $gpoAllUnread.Count) {
-                      $ruleNote[$Id] = "Nierozstrzygnięty ($($gpoAllUnread.Count) GPO nieczytelnych dla konta przeglądu)"
+                  } elseif (-not @($Ok).Count -and $gpoUnreadComp.Count) {
+                      $ruleNote[$Id] = "Nierozstrzygnięty ($($gpoUnreadComp.Count) GPO nieczytelnych dla konta przeglądu, podlinkowanych do miejsc z komputerami)"
                   } }
 
         $ll = & $pick 'Windows NT\DNSClient' 'EnableMulticast'
         $llOk = @($ll | Where-Object { "$($_.Data)" -eq '0' })
-        if ($gpoAllUnread.Count -and -not $llOk.Count) { & $cond 'D-GPO-LLMNR' $llOk }
+        if ($gpoUnreadComp.Count -and -not $llOk.Count) { & $cond 'D-GPO-LLMNR' $llOk }
         elseif (-not $llOk.Count) {
             Add-Finding @{
                 Id = 'D-GPO-LLMNR'; Category = $catDom; Severity = 'Medium'
@@ -4221,7 +4239,7 @@ if (-not $SkipDCChecks) {
 
         $ps = & $pick 'PowerShell\ScriptBlockLogging' 'EnableScriptBlockLogging'
         $psOk = @($ps | Where-Object { "$($_.Data)" -eq '1' })
-        if ($gpoAllUnread.Count -and -not $psOk.Count) { & $cond 'D-GPO-PSLOG' $psOk }
+        if ($gpoUnreadComp.Count -and -not $psOk.Count) { & $cond 'D-GPO-PSLOG' $psOk }
         elseif (-not $psOk.Count) {
             Add-Finding @{
                 Id = 'D-GPO-PSLOG'; Category = $catDom; Severity = 'Low'
