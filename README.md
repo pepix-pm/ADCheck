@@ -4,6 +4,27 @@ Skrypt PowerShell do przeglądu bezpieczeństwa Active Directory. Działa na **z
 
 Tworzy i rozwija [PEPIX](https://pepix.pl) – przeglądy bezpieczeństwa Active Directory, wdrożenia poprawek z raportu i stała opieka nad infrastrukturą Microsoft.
 
+## Dlaczego ADCheck?
+
+- **Wystarczy zwykłe konto domenowe.** Większość testów, także kontrolerów domeny, działa bez uprawnień administracyjnych: odczyt LDAP i SYSVOL oraz nieinwazyjne sondy sieciowe. Tryb `-UseWinRM` uzupełnia wynik o rzeczywisty stan DC.
+- **Nic nie instaluje i niczego nie zmienia.** Jeden plik PowerShell, bez RSAT, agentów i dodatkowych modułów; wyłącznie odczyt.
+- **Raport, z którym można pracować.** Każde znalezisko ma opis ryzyka zrozumiały dla właściciela domeny, zalecenie i przykładowe polecenia naprawcze. Plan naprawczy dzieli zadania na trzy etapy z szacunkiem pracochłonności.
+- **Odniesienia do wymagań.** Znaleziska są przypisane do środków z art. 21 NIS2 / UKSC, zabezpieczeń ISO/IEC 27001:2022 (załącznik A) i technik MITRE ATT&CK; konfiguracja DC jest porównana z CIS Benchmark i Microsoft Security Baseline.
+- **Porównania w czasie.** `-Previous` pokazuje, co naprawiono i co doszło, `-History` – trend wyniku; JSON i CSV nadają się do własnych zestawień.
+- **Jawne granice oceny.** Raport podaje, ile reguł faktycznie ocenił i które wyniki opierają się na źródle pośrednim (np. GPO zamiast rejestru DC), zamiast traktować brak danych jako zaliczenie.
+- **Po polsku.** Raport i komunikaty są w języku polskim; grupy uprzywilejowane są rozpoznawane po SID, więc spolszczone nazwy grup nie przeszkadzają.
+
+## Czego ADCheck nie sprawdza
+
+- Nie zastępuje testów penetracyjnych i nie próbuje wykorzystać podatności.
+- Nie analizuje stacji końcowych ani serwerów członkowskich – ocenia konfigurację zapisaną w AD, GPO i kontrolery domeny.
+- Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder, GPO podpiętych do domeny i OU Domain Controllers oraz na obiektach Tier 0 (konta i grupy uprzywilejowane, konta DC, OU Domain Controllers) – nie na pozostałych kontach, OU i serwerach.
+- Z usług certyfikatów (AD CS) ocenia konfigurację zapisaną w AD (ESC1–5, 9, 13), ustawienia i uprawnienia CA przez jego interfejs administracyjny (ESC6, 7, 11 – wymaga łączności RPC z serwerem CA) i sondą HTTP rejestrację przez WWW (ESC8); rejestr DC (ESC10) ocenia tylko z `-UseWinRM`; nie ocenia HTTPS z EPA. Gdy serwer CA jest nieosiągalny, reguły mają status „Nierozstrzygnięty”, a przyczyna trafia do znaleziska INFO-ADCS-UNVERIFIED.
+- Ocena GPO kontrolerów domeny uwzględnia łącza wymuszone, blokowanie dziedziczenia i filtrowanie zabezpieczeń (od v0.31); nie ocenia treści filtrów WMI (takie GPO są oznaczane jako niepewne), GPO podlinkowanych do lokacji ani tego, które GPO faktycznie obejmują dany komputer poza DC.
+- Przypisania praw użytkowników na DC odczytuje z GPO (konfiguracja zamierzona), także przy `-UseWinRM`.
+- Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni).
+- Polecenia naprawcze w raporcie są przykładowe: przed wykonaniem sprawdź ich skutki w środowisku testowym i wprowadzaj je zgodnie z zasadami zarządzania zmianami w organizacji.
+
 ## Wymagania
 
 - Windows 10/11 lub Windows Server z PowerShellem (Windows PowerShell 5.1 lub PowerShell 7)
@@ -304,10 +325,6 @@ Invoke-Pester .\tests
 
 Testy (Pester 5) ładują z pliku skryptu definicje funkcji niezależnych od AD, bez uruchamiania skryptu. Warstwa raportu (HTML, JSON, CSV) jest sprawdzana na fikcyjnych danych z `tests/fixtures/znaleziska.json`. Reguły o najwyższej wadze mają testy regresyjne: niebezpieczne prawa w ACL, DCSync, szablony certyfikatów (ESC1–3, 9) i hasła w preferencjach GPO (pliki przykładowe `tests/fixtures/gpp-*.xml`). Przy każdym pushu i pull requeście GitHub Actions (`.github/workflows/ci.yml`, Windows) uruchamia PSScriptAnalyzer (Warning, Error; wyłączone reguły z uzasadnieniem w `PSScriptAnalyzerSettings.psd1`), testy Pester oraz sprawdza kodowanie UTF-8 z BOM plików `*.ps1`.
 
-## Ograniczenia
-
-Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje stacji końcowych. Z usług certyfikatów (AD CS) ocenia konfigurację zapisaną w AD (ESC1–5, 9, 13), ustawienia i uprawnienia CA przez jego interfejs administracyjny (ESC6, 7, 11 – wymaga łączności RPC z serwerem CA) i sondą HTTP rejestrację przez WWW (ESC8); rejestr DC (ESC10) ocenia tylko z `-UseWinRM`; nie ocenia HTTPS z EPA. Gdy serwer CA jest nieosiągalny, reguły mają status „Nierozstrzygnięty”, a przyczyna trafia do znaleziska INFO-ADCS-UNVERIFIED. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder, GPO podpiętych do domeny i OU Domain Controllers oraz na obiektach Tier 0 (konta i grupy uprzywilejowane, konta DC, OU Domain Controllers) – nie na pozostałych kontach, OU i serwerach. Ocena GPO kontrolerów domeny uwzględnia łącza wymuszone, blokowanie dziedziczenia i filtrowanie zabezpieczeń (od v0.31); nie ocenia treści filtrów WMI (takie GPO są oznaczane jako niepewne), GPO podlinkowanych do lokacji ani tego, które GPO faktycznie obejmują dany komputer poza DC. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe: przed wykonaniem sprawdź ich skutki w środowisku testowym i wprowadzaj je zgodnie z zasadami zarządzania zmianami w organizacji.
-
 ## Zgoda na badanie i ślad w środowisku
 
 Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie jest pisemna zgoda jego właściciela** (np. umowa lub zlecenie przeglądu z określonym zakresem i terminem). Administrator badający własną domenę również powinien mieć zgodę przełożonych lub osoby odpowiedzialnej za bezpieczeństwo.
@@ -324,6 +341,10 @@ Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie je
 Te operacje mogą trafić do logów DC i SIEM oraz wywołać alerty (np. Microsoft Defender for Identity: rozpoznanie przez LDAP, wyliczanie sesji SMB) lub zostać zablokowane przez zaporę. Uzgodnij termin przeglądu z właścicielem środowiska i uprzedź zespół monitorujący bezpieczeństwo (SOC).
 
 `-UseWinRM` nie przyjmuje haseł: używa tożsamości Kerberos bieżącej sesji (np. po `runas /netonly`). Poświadczenia nie trafiają do raportu, plików wynikowych ani konsoli; na DC zostaje zwykły ślad logowania sieciowego (zdarzenie 4624, typ 3) i – jeśli włączone – rejestrowanie poleceń PowerShell.
+
+## Udział w rozwoju
+
+Zgłoszenia błędów i propozycje testów są mile widziane – zasady (w tym warunki licencyjne dla przesyłanych zmian) są w [CONTRIBUTING.md](CONTRIBUTING.md). Na początek dobre są zgłoszenia z etykietą [good first issue](https://github.com/pepix-pm/ADCheck/labels/good%20first%20issue).
 
 ## Licencja
 
