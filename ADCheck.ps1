@@ -94,7 +94,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.31'
+$Version = '0.32'
 $jsonSchemaVersion = '1.3'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -5203,10 +5203,12 @@ if (-not $SkipDCChecks) {
             $onPdc = ("$pdc" -ieq "$env:COMPUTERNAME") -or ("$pdc" -like "$env:COMPUTERNAME.*")
             if ($onPdc) {
                 # przegląd na samym PDC: źródło czasu z w32tm bez WinRM (odczyt nie wymaga uprawnień administratora)
+                $global:LASTEXITCODE = 0
                 try { $w32 = "$((& w32tm.exe /query /source 2>$null) -join ' ')".Trim() } catch { $w32 = '' }
                 if ($LASTEXITCODE) { $w32 = '' }
             } elseif ($UseWinRM) {
-                try { $w32 = "$(Invoke-Command -ComputerName $pdc -ErrorAction Stop -ScriptBlock { (& w32tm.exe /query /source 2>$null) -join ' ' })".Trim() } catch { $w32 = '' }
+                # przy błędzie w32tm wypisuje komunikat na stdout - bez kontroli kodu wyjścia trafiłby do raportu jako źródło czasu
+                try { $w32 = "$(Invoke-Command -ComputerName $pdc -ErrorAction Stop -ScriptBlock { $o = (& w32tm.exe /query /source 2>$null) -join ' '; if ($LASTEXITCODE) { '' } else { $o } })".Trim() } catch { $w32 = '' }
             }
             $issue = Get-NtpSourceIssue $ntp
             if (-not $issue -and $w32 -match 'VM IC Time Synchronization Provider') { $issue = 'czas z hosta wirtualizacji (VM IC Time Synchronization Provider)' }

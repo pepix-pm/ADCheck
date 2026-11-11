@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.32 – 2026-11-11
+
+- **DC-TIME-SOURCE z `-UseWinRM`**: gdy `w32tm /query /source` na PDC kończy się błędem (np. zatrzymana usługa W32Time), jego komunikat nie jest już traktowany jako źródło czasu – wcześniej trafiał do kolumny ZrodloW32tm, a znalezisko dostawało pewność „Wysoka”. Teraz wynik opiera się na odpowiedzi NTP z pewnością „Średnia”, tak jak przy odczycie lokalnym na PDC.
+
 ## 0.31 – 2026-11-11
 
 - **Pierwszeństwo GPO kontrolerów domeny** (DC-LDAPSIGN, DC-LDAPCBT, DC-NTLMV1, DC-CIS-*, DC-MSBASE – odczyt z GPO): uwzględniane są łącza wymuszone (Enforced; wygrywają z GPO niższego poziomu, a wymuszone łącze domeny – z wymuszonym na OU) i blokowanie dziedziczenia na OU Domain Controllers (niewymuszone GPO domeny są pomijane). Wcześniej wygrywało zawsze GPO z OU Domain Controllers, więc przy wymuszonym GPO domeny raport mógł podać wartość, której DC nie stosuje.
