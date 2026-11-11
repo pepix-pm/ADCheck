@@ -15,6 +15,7 @@
     -MaxHistoryPoints: największa liczba przeglądów w historii (domyślnie 24 najnowsze, razem z bieżącym).
     -IncludeCheck / -ExcludeCheck: tylko wskazane testy albo wszystkie poza wskazanymi - nazwy testów (np. ADCS, DC-PROBE) lub Id reguł
       (np. D-ADCS-ESC1 = cały test ADCS). Przegląd częściowy: wynik nie jest porównywalny z pełnym i nie trafia do historii.
+    -ListChecks: wypisuje testy i reguły (nazwy do -IncludeCheck / -ExcludeCheck) i kończy - bez połączenia z domeną.
     -Client: alias -Klient.
     Wynik: szczegółowy raport HTML, JSON (do porównań), CSV znalezisk i CSV obiektów.
     Punkty: Critical=25, High=10, Medium=3, Low=1 za znalezisko; wynik 0-100 w czterech obszarach ryzyka,
@@ -25,6 +26,8 @@
     .\ADCheck.ps1 -Client KLIENT -Server firma.local -UseWinRM
     .\ADCheck.ps1 -Client KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
     .\ADCheck.ps1 -Client KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json -History   # z wykresem wcześniejszych przeglądów z katalogu raporty
+    .\ADCheck.ps1 -ListChecks | Format-Table -AutoSize   # testy i reguły do -IncludeCheck / -ExcludeCheck
+    .\ADCheck.ps1 -Client KLIENT -IncludeCheck ADCS, DC-PROBE   # tylko wskazane testy (przegląd częściowy)
     .\ADCheck.ps1 -Client KLIENT -Silent   # bez komunikatów w konsoli; zwraca obiekt ze ścieżkami raportu i wynikiem
     # bez kopiowania pliku na serwer (z wydania na GitHubie, z weryfikacją SHA256) - patrz README, sekcja "Uruchomienie z GitHuba"
 
@@ -34,9 +37,10 @@
     Wolno używać, także w firmie; nie wolno oferować na tym narzędziu produktu ani usługi konkurencyjnej wobec licencjodawcy.
     https://github.com/pepix-pm/ADCheck
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Przeglad')]
 param(
-    [Parameter(Mandatory)][Alias('Client')][string]$Klient,
+    [Parameter(Mandatory, ParameterSetName = 'Przeglad')][Alias('Client')][string]$Klient,
+    [Parameter(Mandatory, ParameterSetName = 'Lista')][switch]$ListChecks,
     [string]$Server = $env:USERDNSDOMAIN,
     [string]$OutDir,
     [int]$StaleDays = 90,
@@ -60,6 +64,174 @@ $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 function Write-Step([string]$Text = '', [string]$Color = 'Gray', [switch]$NoNewline) {
     if ($Silent) { return }
     Write-Host $Text -ForegroundColor $Color -NoNewline:$NoNewline
+}
+# ---------- katalog reguł: obszar ryzyka, model, test źródłowy ----------
+# O: S = obiekty nieaktualne, P = konta uprzywilejowane, T = zaufania, A = anomalie (wynik 0-100 na obszar, wynik ogólny = najgorszy obszar)
+# M: model ryzyka (wiersz macierzy); C: nazwa Invoke-Check (DC-PROBE = testy pojedynczych DC); W: wymaganie (DC = bez -SkipDCChecks, WinRM = -UseWinRM)
+# N: reguła nie dotyczy, gdy wystąpi wskazane znalezisko; T: krótki opis do listy sprawdzonych reguł
+# Nowy test = nowy wpis tutaj (inaczej trafi do obszaru Anomalie, modelu "Inne" i nie pojawi się na liście sprawdzonych reguł).
+$areaNames = [ordered]@{ S = 'Obiekty nieaktualne'; P = 'Konta uprzywilejowane'; T = 'Zaufania'; A = 'Anomalie' }
+$ruleCatalog = @(
+    @{ Id = 'U-STALE';           O = 'S'; M = 'Nieaktywne konta';             C = 'USERS';        T = 'Aktywne konta użytkowników nieużywane' }
+    @{ Id = 'C-STALE';           O = 'S'; M = 'Nieaktywne konta';             C = 'COMPUTERS';    T = 'Aktywne konta komputerów nieużywane' }
+    @{ Id = 'U-PWDNOTREQ';       O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Flaga PASSWD_NOTREQD' }
+    @{ Id = 'U-REVERSIBLE';      O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Hasła przechowywane odwracalnie' }
+    @{ Id = 'U-PNE';             O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Zwykłe konta z hasłem bez wygasania' }
+    @{ Id = 'U-SIDHIST';         O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Konta z SIDHistory' }
+    @{ Id = 'U-GUEST';           O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Włączone konto Gość' }
+    @{ Id = 'C-MAQ';             O = 'S'; M = 'Konfiguracja kont';            C = 'COMPUTERS';    T = 'MachineAccountQuota > 0' }
+    @{ Id = 'C-OS-EOL';          O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Komputery z systemem bez wsparcia' }
+    @{ Id = 'C-OS-W10';          O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Windows 10 (poza LTSC)' }
+    @{ Id = 'C-OS-FEATURE';      O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Windows 11 w wersji bez wsparcia' }
+    @{ Id = 'C-OS-SOON';         O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Koniec wsparcia serwerów/LTSC w ciągu 12 mies.' }
+    @{ Id = 'DC-OS-EOL';         O = 'S'; M = 'Przestarzałe systemy';         C = 'DC-OS';        T = 'DC z systemem bez wsparcia' }
+    @{ Id = 'D-DFL';             O = 'S'; M = 'Przestarzałe systemy';         C = 'DOMAIN';       T = 'Poziom funkcjonalny domeny < 2016' }
+    @{ Id = 'DC-PATCH-OLD';      O = 'S'; M = 'Zarządzanie poprawkami';       C = 'DC-PATCH';     W = 'DC'; T = 'DC bez aktualnych poprawek' }
+    @{ Id = 'DC-PATCH-DIFF';     O = 'S'; M = 'Zarządzanie poprawkami';       C = 'DC-PATCH';     W = 'DC'; T = 'Różny poziom poprawek DC' }
+    @{ Id = 'DC-REBOOT';         O = 'S'; M = 'Zarządzanie poprawkami';       C = 'DC-PATCH';     W = 'WinRM'; T = 'DC oczekujący na restart / długi uptime' }
+    @{ Id = 'U-DES';             O = 'S'; M = 'Przestarzałe protokoły';       C = 'USERS';        T = 'Konta z wymuszonym DES' }
+    @{ Id = 'D-KRB-DES';         O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      T = 'DES dopuszczony w konfiguracji Kerberos' }
+    @{ Id = 'D-KRB-NOAES';       O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      T = 'Konta bez kluczy AES' }
+    @{ Id = 'DC-KRB-DES-USED';   O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      W = 'WinRM'; T = 'Wydane bilety Kerberos DES' }
+    @{ Id = 'DC-KRB-RC4-USED';   O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      W = 'WinRM'; T = 'Wydane bilety Kerberos RC4' }
+    @{ Id = 'DC-SMB1';           O = 'S'; M = 'Przestarzałe protokoły';       C = 'DC-PROBE';     W = 'DC'; T = 'SMBv1 na DC' }
+    @{ Id = 'DC-NTLMV1';         O = 'S'; M = 'Przestarzałe protokoły';       C = 'DC-PROBE';     W = 'DC'; T = 'DC akceptuje NTLMv1/LM' }
+    @{ Id = 'DC-REPL-FAIL';      O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Błędy replikacji AD' }
+    @{ Id = 'DC-REPL-STALE';     O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Replikacja nieudana > 24 h' }
+    @{ Id = 'DC-REPL-TSL';       O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Replikacja nieudana > tombstone lifetime' }
+    @{ Id = 'D-SINGLEDC';        O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Tylko jeden kontroler domeny' }
+    @{ Id = 'D-SYSVOL-FRS';      O = 'S'; M = 'Replikacja i kondycja';        C = 'SYSVOL-FRS';   T = 'SYSVOL na FRS' }
+    @{ Id = 'D-FSMO';            O = 'S'; M = 'Replikacja i kondycja';        C = 'FSMO';         T = 'Osierocone role FSMO' }
+    @{ Id = 'DC-MACHINEPWD';     O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-MACHINEPWD'; T = 'Stare hasło konta komputera DC' }
+    @{ Id = 'DC-PORTS';          O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Niedostępne usługi AD na DC' }
+    @{ Id = 'DC-SYSVOL-SHARE';   O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Brak udziału SYSVOL/NETLOGON' }
+    @{ Id = 'DC-TIME';           O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Różnica czasu DC względem PDC' }
+    @{ Id = 'DC-TIME-SOURCE';    O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Źródło czasu PDC Emulatora' }
+    @{ Id = 'D-GPO-SYNC';        O = 'S'; M = 'Replikacja i kondycja';        C = 'GPO-SYNC';     W = 'DC'; T = 'GPO niespójne AD-SYSVOL' }
+    @{ Id = 'DC-DNS-SRV';        O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-DNS';       W = 'DC'; T = 'Brak rekordów SRV DC' }
+
+    @{ Id = 'P-DA-COUNT';        O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Ponad 5 członków Domain Admins' }
+    @{ Id = 'P-SchemaAdmins';    O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Schema Admins' }
+    @{ Id = 'P-AccountOperators'; O = 'P'; M = 'Grupy uprzywilejowane';       C = 'PRIV';         T = 'Niepusta grupa Account Operators' }
+    @{ Id = 'P-DnsAdmins';       O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa DnsAdmins' }
+    @{ Id = 'P-KeyAdmins';       O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Key Admins' }
+    @{ Id = 'P-EnterpriseKeyAdmins'; O = 'P'; M = 'Grupy uprzywilejowane';    C = 'PRIV';         T = 'Niepusta grupa Enterprise Key Admins' }
+    @{ Id = 'P-GPCO';            O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Nie-admini w Group Policy Creator Owners' }
+    @{ Id = 'D-GPO-LOCALADMIN';  O = 'P'; M = 'Grupy uprzywilejowane';        C = 'GPO-ADMINS';   W = 'DC'; T = 'Lokalni administratorzy nadawani przez GPO' }
+    @{ Id = 'D-GPP-PASSWORD';    O = 'A'; M = 'Ujawnione hasła';              C = 'GPP';          W = 'DC'; T = 'Hasła w preferencjach GPO (SYSVOL)' }
+    @{ Id = 'P-ServerOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Server Operators' }
+    @{ Id = 'P-PrintOperators';  O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Print Operators' }
+    @{ Id = 'P-BackupOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Backup Operators' }
+    @{ Id = 'P-PNE';             O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini z hasłem bez wygasania' }
+    @{ Id = 'P-SPN';             O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini z SPN (Kerberoasting)' }
+    @{ Id = 'P-DELEG';           O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini bez ochrony przed delegacją' }
+    @{ Id = 'P-STALE';           O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Nieużywane konta uprzywilejowane' }
+    @{ Id = 'P-ADM500';          O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Stare hasło wbudowanego Administratora' }
+    @{ Id = 'U-ADMINCOUNT';      O = 'P'; M = 'Ochrona kont administratorów'; C = 'USERS';        T = 'Osierocone adminCount=1' }
+    @{ Id = 'U-UNCONSTR';        O = 'P'; M = 'Delegacja';                    C = 'USERS';        T = 'Użytkownicy z delegacją nieograniczoną' }
+    @{ Id = 'C-UNCONSTR';        O = 'P'; M = 'Delegacja';                    C = 'COMPUTERS';    T = 'Komputery z delegacją nieograniczoną' }
+    @{ Id = 'C-LAPS-READ-BROAD'; O = 'P'; M = 'Dostęp do haseł LAPS';         C = 'LAPS-ACL';     N = 'C-LAPS-NONE'; T = 'Hasła LAPS dla szerokich grup' }
+    @{ Id = 'C-LAPS-READABLE';   O = 'P'; M = 'Dostęp do haseł LAPS';         C = 'LAPS-ACL';     N = 'C-LAPS-NONE'; T = 'Konto przeglądu widzi hasła LAPS' }
+    @{ Id = 'C-LAPS-READERS';    O = 'P'; M = 'Dostęp do haseł LAPS';         C = 'LAPS-ACL';     N = 'C-LAPS-NONE'; T = 'Podmioty z dostępem do haseł LAPS' }
+    @{ Id = 'DC-CIS-RIGHTS';     O = 'P'; M = 'Prawa na kontrolerach domeny'; C = 'CIS';          W = 'DC'; T = 'Przypisanie praw użytkowników na DC' }
+
+    @{ Id = 'D-TRUST-SIDF';      O = 'T'; M = 'Filtrowanie SID';              C = 'DOMAIN';       T = 'Zaufania zewnętrzne bez filtrowania SID' }
+    @{ Id = 'D-KRB-TRUST';       O = 'T'; M = 'Szyfrowanie zaufań';           C = 'KRB-ENC';      T = 'Zaufania bez AES' }
+
+    @{ Id = 'P-KRBTGT';          O = 'A'; M = 'Golden Ticket';                C = 'PRIV';         T = 'Stare hasło krbtgt' }
+    @{ Id = 'C-LAPS-NONE';       O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    T = 'LAPS nie wdrożony (schemat lub komputery)' }
+    @{ Id = 'C-LAPS-MISSING';    O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Komputery bez LAPS' }
+    @{ Id = 'C-LAPS-EXPIRED';    O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Hasło LAPS przestało się zmieniać' }
+    @{ Id = 'C-LAPS-LEGACY';     O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Przestarzały Microsoft LAPS' }
+    @{ Id = 'U-ASREP';           O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta bez preautentykacji Kerberos' }
+    @{ Id = 'U-SPN';             O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta użytkowników z SPN' }
+    @{ Id = 'D-PWDLEN';          O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Minimalna długość hasła < 12' }
+    @{ Id = 'D-PWDCPLX';         O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Złożoność haseł wyłączona' }
+    @{ Id = 'D-LOCKOUT';         O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Brak blokady konta' }
+    @{ Id = 'DC-SPOOLER';        O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'Print Spooler na DC' }
+    @{ Id = 'DC-LDAPSIGN';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'Podpisywanie LDAP niewymagane' }
+    @{ Id = 'DC-LDAPCBT';        O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'LDAP channel binding niewymuszony' }
+    @{ Id = 'DC-CIS-AUDIT';      O = 'A'; M = 'Audyt';                        C = 'CIS';          W = 'DC'; T = 'Zasady audytu DC (CIS L1)' }
+    @{ Id = 'DC-CIS-REG';        O = 'A'; M = 'Utwardzenie DC';               C = 'CIS';          W = 'DC'; T = 'Ustawienia zabezpieczeń DC (CIS L1)' }
+    @{ Id = 'DC-MSBASE';         O = 'A'; M = 'Utwardzenie DC';               C = 'CIS';          W = 'DC'; T = 'Ustawienia DC wg Microsoft Security Baseline' }
+    @{ Id = 'D-BACKUP';          O = 'A'; M = 'Kopia i odtwarzanie';          C = 'BACKUP';       T = 'Brak aktualnej kopii AD' }
+    @{ Id = 'D-RECYCLE';         O = 'A'; M = 'Kopia i odtwarzanie';          C = 'DOMAIN';       T = 'Kosz AD wyłączony' }
+    @{ Id = 'D-FFL';             O = 'S'; M = 'Przestarzałe systemy';         C = 'DOMAIN';       T = 'Poziom funkcjonalny lasu < 2016' }
+    @{ Id = 'DC-REGISTRATION';   O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-REG';       T = 'Konto DC bez kompletnej rejestracji w lesie' }
+    @{ Id = 'DC-SUBNET';         O = 'S'; M = 'Replikacja i kondycja';        C = 'SITES';        T = 'Adres DC poza podsieciami AD' }
+    @{ Id = 'P-ADMLOGIN';        O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Wbudowany Administrator używany' }
+    @{ Id = 'P-PROTECTED';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane spoza Protected Users' }
+    @{ Id = 'C-OWNER';           O = 'A'; M = 'Delegacja';                    C = 'COMP-OWNER';   T = 'Komputery z właścicielem spoza administratorów' }
+    @{ Id = 'D-OWNER-OU';        O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'OU i kontenery z właścicielem spoza administratorów' }
+    @{ Id = 'D-OWNER-GPO';       O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'GPO z właścicielem spoza administratorów' }
+    @{ Id = 'P-OWNER-GROUP';     O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'Grupy z właścicielem spoza administratorów' }
+    @{ Id = 'U-OWNER-USER';      O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'Konta użytkowników z właścicielem spoza administratorów' }
+    @{ Id = 'D-PREWIN2000';      O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'Szerokie grupy w Pre-Windows 2000 Compatible Access' }
+    @{ Id = 'D-DSHEURISTICS';    O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'dSHeuristics osłabia zabezpieczenia' }
+    @{ Id = 'D-DNS-CREATECHILD'; O = 'A'; M = 'Przechwytywanie i relay';      C = 'DNS-ZONES';       T = 'Strefy DNS bez ochrony przed ADIDNS spoofing' }
+    @{ Id = 'DC-ANONLDAP';       O = 'A'; M = 'Uprawnienia domyślne';         C = 'DC-PROBE';     W = 'DC'; T = 'Anonimowe zapytania LDAP do DC' }
+    @{ Id = 'DC-NETSESSION';     O = 'A'; M = 'Uprawnienia domyślne';         C = 'DC-PROBE';     W = 'DC'; T = 'Wyliczanie sesji SMB na DC (NetCease)' }
+    @{ Id = 'D-GPO-LLMNR';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'LLMNR niewyłączony w GPO' }
+    @{ Id = 'D-GPO-HARDPATH';    O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'Hardened UNC Paths dla SYSVOL/NETLOGON' }
+    @{ Id = 'D-GPO-PSLOG';       O = 'A'; M = 'Audyt';                        C = 'GPO-ALL';      W = 'DC'; T = 'Rejestrowanie bloków skryptów PowerShell' }
+    @{ Id = 'P-ADMINMAIL';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane z adresem e-mail' }
+    @{ Id = 'D-DCSYNC';          O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Prawo replikacji haseł (DCSync) poza DC i adminami' }
+    @{ Id = 'D-ACL-DOMAIN';      O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Prawa przejęcia obiektu domeny' }
+    @{ Id = 'D-ACL-ADMINSDHOLDER'; O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';        T = 'Niestandardowe uprawnienia na AdminSDHolder' }
+    @{ Id = 'D-ACL-GPO';         O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Edycja GPO domeny/DC przez nie-adminów' }
+    @{ Id = 'P-ACL-TIER0';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Prawa nie-adminów do kont, grup i DC (Tier 0)' }
+    @{ Id = 'DC-RBCD';           O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontrolerze domeny' }
+    @{ Id = 'D-KCD-DC';          O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'Delegacja ograniczona do usług DC' }
+    @{ Id = 'D-ADCS-ESC1';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon: podmiot z żądania + uwierzytelnianie (ESC1)' }
+    @{ Id = 'D-ADCS-ESC2';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon: dowolne zastosowanie lub brak EKU (ESC2)' }
+    @{ Id = 'D-ADCS-ESC3';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon agenta rejestracji (ESC3)' }
+    @{ Id = 'D-ADCS-ESC9';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon bez rozszerzenia SID (ESC9)' }
+    @{ Id = 'D-ADCS-ESC10';      O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         W = 'WinRM'; T = 'Słabe wiązanie certyfikatów z kontami na DC (ESC10)' }
+    @{ Id = 'D-ADCS-ORPHAN';     O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'CA wycofane, ale nadal zarejestrowane w AD' }
+    @{ Id = 'D-ADCS-ESC13';      O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Zasady wystawiania powiązane z grupą (ESC13)' }
+    @{ Id = 'D-ADCS-ESC6';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'CA przyjmuje nazwę alternatywną z żądania (ESC6)' }
+    @{ Id = 'D-ADCS-ESC7';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawa ManageCA / ManageCertificates dla nie-administratorów (ESC7)' }
+    @{ Id = 'D-ADCS-ESC11';      O = 'A'; M = 'Przechwytywanie i relay';      C = 'ADCS';         T = 'CA nie wymaga szyfrowania żądań RPC (ESC11)' }
+    @{ Id = 'D-ADCS-ESC8';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'ADCS';         T = 'Web Enrollment przez HTTP z NTLM (ESC8)' }
+    @{ Id = 'D-ADCS-ESC4';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawo zmiany opublikowanych szablonów (ESC4)' }
+    @{ Id = 'D-ADCS-ESC5';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawa do obiektów PKI i serwerów CA (ESC5)' }
+    @{ Id = 'P-GMSA-READ';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Odczyt haseł gMSA: szerokie grupy, gMSA uprzywilejowane' }
+    @{ Id = 'C-RBCD';            O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontach poza DC' }
+    @{ Id = 'U-SPN-WEAK';        O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta z SPN: hasło starsze niż 3 lata, bez AES' }
+    @{ Id = 'D-FGPP-WEAK';       O = 'A'; M = 'Łamanie haseł';                C = 'FGPP';         T = 'PSO słabsze od polityki haseł domeny' }
+    @{ Id = 'D-SPN-DUP';         O = 'S'; M = 'Konfiguracja kont';            C = 'DUPLICATES';   T = 'Zduplikowane SPN' }
+    @{ Id = 'D-UPN-DUP';         O = 'S'; M = 'Konfiguracja kont';            C = 'DUPLICATES';   T = 'Zduplikowane UPN' }
+    @{ Id = 'D-GPO-UNLINKED';    O = 'S'; M = 'Porządek w konfiguracji';      C = 'GPO-LINKS';    T = 'GPO bez aktywnych łączy' }
+    @{ Id = 'D-GPO-DEADLINK';    O = 'S'; M = 'Porządek w konfiguracji';      C = 'GPO-LINKS';    T = 'Łącza do nieistniejących GPO' }
+    @{ Id = 'D-TRUST-SELAUTH';   O = 'T'; M = 'Relacje zaufania';             C = 'TRUSTS';       T = 'Zaufania bez uwierzytelniania selektywnego' }
+    @{ Id = 'D-TRUST-STALE';     O = 'T'; M = 'Relacje zaufania';             C = 'TRUSTS';       T = 'Zaufania bez zmiany hasła > 90 dni' }
+)
+# Nazwy testów w konsoli
+$checkLabels = @{
+    'PRIV' = 'Konta uprzywilejowane'; 'USERS' = 'Konta użytkowników'; 'COMPUTERS' = 'Komputery, systemy i LAPS'
+    'COMP-OWNER' = 'Właściciele kont komputerów'; 'OWNERS' = 'Właściciele OU, GPO, grup i kont'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'; 'ACL-TIER0' = 'Uprawnienia Tier 0, delegacja do DC'
+    'LAPS-ACL' = 'Dostęp do haseł LAPS'; 'KRB-ENC' = 'Kerberos: szyfrowanie DES/RC4'; 'DOMAIN' = 'Domena, las, hasła, DNS'
+    'DC-OS' = 'Systemy kontrolerów domeny'; 'DC-GPO' = 'GPO kontrolerów domeny'; 'GPO-ALL' = 'GPO w całej domenie'; 'GPP' = 'Hasła w preferencjach GPO (SYSVOL)'; 'GPO-ADMINS' = 'Lokalni administratorzy z GPO'
+    'CIS' = 'Konfiguracja DC (CIS i Microsoft)'; 'DC-PATCH' = 'Aktualizacje kontrolerów domeny'; 'REPL' = 'Replikacja AD'
+    'BACKUP' = 'Kopia zapasowa AD'; 'SYSVOL-FRS' = 'Replikacja SYSVOL'; 'FSMO' = 'Role FSMO'; 'DC-REG' = 'Rejestracja kontrolerów domeny'
+    'SITES' = 'Lokacje i podsieci'; 'DC-MACHINEPWD' = 'Hasła kont komputerów DC'; 'DC-NET' = 'Porty i udziały DC'
+    'GPO-SYNC' = 'Spójność GPO (AD / SYSVOL)'; 'DC-DNS' = 'Rekordy DNS kontrolerów'
+    'FGPP' = 'Szczegółowe zasady haseł (PSO)'; 'DUPLICATES' = 'Zduplikowane SPN i UPN'; 'GPO-LINKS' = 'GPO bez łączy'; 'TRUSTS' = 'Relacje zaufania'
+    'ADCS' = 'Usługi certyfikatów (AD CS)'
+}
+
+# -ListChecks: lista testów i reguł do -IncludeCheck / -ExcludeCheck - bez połączenia z domeną i bez przeglądu.
+# Kolumna Test = nazwa do -IncludeCheck / -ExcludeCheck; Id reguły wybiera cały test, do którego reguła należy.
+if ($ListChecks) {
+    $ruleCatalog | ForEach-Object {
+        [pscustomobject]@{
+            Test    = $(if ($_.C -eq 'DNS-ZONES') { 'DOMAIN' } else { $_.C })
+            Regula  = $_.Id
+            Wymaga  = $(if ($_.W -eq 'WinRM') { '-UseWinRM' } elseif ($_.W -eq 'DC') { 'testy DC (bez -SkipDCChecks)' } else { '' })
+            Opis    = $_.T
+        }
+    } | Sort-Object Test, Regula
+    return
 }
 Write-Step "ADCheck $Version | klient: $Klient | domena: $Server | konto: $env:USERDOMAIN\$env:USERNAME" 'Cyan'
 Write-Step 'Sprawdzanie wymagań i połączenia z domeną...'
@@ -521,147 +693,6 @@ function ConvertTo-OsRow($x) {
         Add-Member -NotePropertyName KoniecWsparcia -NotePropertyValue ("$(Format-Date $x.L.Koniec)" + $(if ($x.L.Szacunek) { ' (szacunek)' } else { '' })) -PassThru
 }
 
-# ---------- katalog reguł: obszar ryzyka, model, test źródłowy ----------
-# O: S = obiekty nieaktualne, P = konta uprzywilejowane, T = zaufania, A = anomalie (wynik 0-100 na obszar, wynik ogólny = najgorszy obszar)
-# M: model ryzyka (wiersz macierzy); C: nazwa Invoke-Check (DC-PROBE = testy pojedynczych DC); W: wymaganie (DC = bez -SkipDCChecks, WinRM = -UseWinRM)
-# N: reguła nie dotyczy, gdy wystąpi wskazane znalezisko; T: krótki opis do listy sprawdzonych reguł
-# Nowy test = nowy wpis tutaj (inaczej trafi do obszaru Anomalie, modelu "Inne" i nie pojawi się na liście sprawdzonych reguł).
-$areaNames = [ordered]@{ S = 'Obiekty nieaktualne'; P = 'Konta uprzywilejowane'; T = 'Zaufania'; A = 'Anomalie' }
-$ruleCatalog = @(
-    @{ Id = 'U-STALE';           O = 'S'; M = 'Nieaktywne konta';             C = 'USERS';        T = 'Aktywne konta użytkowników nieużywane' }
-    @{ Id = 'C-STALE';           O = 'S'; M = 'Nieaktywne konta';             C = 'COMPUTERS';    T = 'Aktywne konta komputerów nieużywane' }
-    @{ Id = 'U-PWDNOTREQ';       O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Flaga PASSWD_NOTREQD' }
-    @{ Id = 'U-REVERSIBLE';      O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Hasła przechowywane odwracalnie' }
-    @{ Id = 'U-PNE';             O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Zwykłe konta z hasłem bez wygasania' }
-    @{ Id = 'U-SIDHIST';         O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Konta z SIDHistory' }
-    @{ Id = 'U-GUEST';           O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Włączone konto Gość' }
-    @{ Id = 'C-MAQ';             O = 'S'; M = 'Konfiguracja kont';            C = 'COMPUTERS';    T = 'MachineAccountQuota > 0' }
-    @{ Id = 'C-OS-EOL';          O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Komputery z systemem bez wsparcia' }
-    @{ Id = 'C-OS-W10';          O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Windows 10 (poza LTSC)' }
-    @{ Id = 'C-OS-FEATURE';      O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Windows 11 w wersji bez wsparcia' }
-    @{ Id = 'C-OS-SOON';         O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Koniec wsparcia serwerów/LTSC w ciągu 12 mies.' }
-    @{ Id = 'DC-OS-EOL';         O = 'S'; M = 'Przestarzałe systemy';         C = 'DC-OS';        T = 'DC z systemem bez wsparcia' }
-    @{ Id = 'D-DFL';             O = 'S'; M = 'Przestarzałe systemy';         C = 'DOMAIN';       T = 'Poziom funkcjonalny domeny < 2016' }
-    @{ Id = 'DC-PATCH-OLD';      O = 'S'; M = 'Zarządzanie poprawkami';       C = 'DC-PATCH';     W = 'DC'; T = 'DC bez aktualnych poprawek' }
-    @{ Id = 'DC-PATCH-DIFF';     O = 'S'; M = 'Zarządzanie poprawkami';       C = 'DC-PATCH';     W = 'DC'; T = 'Różny poziom poprawek DC' }
-    @{ Id = 'DC-REBOOT';         O = 'S'; M = 'Zarządzanie poprawkami';       C = 'DC-PATCH';     W = 'WinRM'; T = 'DC oczekujący na restart / długi uptime' }
-    @{ Id = 'U-DES';             O = 'S'; M = 'Przestarzałe protokoły';       C = 'USERS';        T = 'Konta z wymuszonym DES' }
-    @{ Id = 'D-KRB-DES';         O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      T = 'DES dopuszczony w konfiguracji Kerberos' }
-    @{ Id = 'D-KRB-NOAES';       O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      T = 'Konta bez kluczy AES' }
-    @{ Id = 'DC-KRB-DES-USED';   O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      W = 'WinRM'; T = 'Wydane bilety Kerberos DES' }
-    @{ Id = 'DC-KRB-RC4-USED';   O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      W = 'WinRM'; T = 'Wydane bilety Kerberos RC4' }
-    @{ Id = 'DC-SMB1';           O = 'S'; M = 'Przestarzałe protokoły';       C = 'DC-PROBE';     W = 'DC'; T = 'SMBv1 na DC' }
-    @{ Id = 'DC-NTLMV1';         O = 'S'; M = 'Przestarzałe protokoły';       C = 'DC-PROBE';     W = 'DC'; T = 'DC akceptuje NTLMv1/LM' }
-    @{ Id = 'DC-REPL-FAIL';      O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Błędy replikacji AD' }
-    @{ Id = 'DC-REPL-STALE';     O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Replikacja nieudana > 24 h' }
-    @{ Id = 'DC-REPL-TSL';       O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Replikacja nieudana > tombstone lifetime' }
-    @{ Id = 'D-SINGLEDC';        O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Tylko jeden kontroler domeny' }
-    @{ Id = 'D-SYSVOL-FRS';      O = 'S'; M = 'Replikacja i kondycja';        C = 'SYSVOL-FRS';   T = 'SYSVOL na FRS' }
-    @{ Id = 'D-FSMO';            O = 'S'; M = 'Replikacja i kondycja';        C = 'FSMO';         T = 'Osierocone role FSMO' }
-    @{ Id = 'DC-MACHINEPWD';     O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-MACHINEPWD'; T = 'Stare hasło konta komputera DC' }
-    @{ Id = 'DC-PORTS';          O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Niedostępne usługi AD na DC' }
-    @{ Id = 'DC-SYSVOL-SHARE';   O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Brak udziału SYSVOL/NETLOGON' }
-    @{ Id = 'DC-TIME';           O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Różnica czasu DC względem PDC' }
-    @{ Id = 'DC-TIME-SOURCE';    O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Źródło czasu PDC Emulatora' }
-    @{ Id = 'D-GPO-SYNC';        O = 'S'; M = 'Replikacja i kondycja';        C = 'GPO-SYNC';     W = 'DC'; T = 'GPO niespójne AD-SYSVOL' }
-    @{ Id = 'DC-DNS-SRV';        O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-DNS';       W = 'DC'; T = 'Brak rekordów SRV DC' }
-
-    @{ Id = 'P-DA-COUNT';        O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Ponad 5 członków Domain Admins' }
-    @{ Id = 'P-SchemaAdmins';    O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Schema Admins' }
-    @{ Id = 'P-AccountOperators'; O = 'P'; M = 'Grupy uprzywilejowane';       C = 'PRIV';         T = 'Niepusta grupa Account Operators' }
-    @{ Id = 'P-DnsAdmins';       O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa DnsAdmins' }
-    @{ Id = 'P-KeyAdmins';       O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Key Admins' }
-    @{ Id = 'P-EnterpriseKeyAdmins'; O = 'P'; M = 'Grupy uprzywilejowane';    C = 'PRIV';         T = 'Niepusta grupa Enterprise Key Admins' }
-    @{ Id = 'P-GPCO';            O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Nie-admini w Group Policy Creator Owners' }
-    @{ Id = 'D-GPO-LOCALADMIN';  O = 'P'; M = 'Grupy uprzywilejowane';        C = 'GPO-ADMINS';   W = 'DC'; T = 'Lokalni administratorzy nadawani przez GPO' }
-    @{ Id = 'D-GPP-PASSWORD';    O = 'A'; M = 'Ujawnione hasła';              C = 'GPP';          W = 'DC'; T = 'Hasła w preferencjach GPO (SYSVOL)' }
-    @{ Id = 'P-ServerOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Server Operators' }
-    @{ Id = 'P-PrintOperators';  O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Print Operators' }
-    @{ Id = 'P-BackupOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Backup Operators' }
-    @{ Id = 'P-PNE';             O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini z hasłem bez wygasania' }
-    @{ Id = 'P-SPN';             O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini z SPN (Kerberoasting)' }
-    @{ Id = 'P-DELEG';           O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini bez ochrony przed delegacją' }
-    @{ Id = 'P-STALE';           O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Nieużywane konta uprzywilejowane' }
-    @{ Id = 'P-ADM500';          O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Stare hasło wbudowanego Administratora' }
-    @{ Id = 'U-ADMINCOUNT';      O = 'P'; M = 'Ochrona kont administratorów'; C = 'USERS';        T = 'Osierocone adminCount=1' }
-    @{ Id = 'U-UNCONSTR';        O = 'P'; M = 'Delegacja';                    C = 'USERS';        T = 'Użytkownicy z delegacją nieograniczoną' }
-    @{ Id = 'C-UNCONSTR';        O = 'P'; M = 'Delegacja';                    C = 'COMPUTERS';    T = 'Komputery z delegacją nieograniczoną' }
-    @{ Id = 'C-LAPS-READ-BROAD'; O = 'P'; M = 'Dostęp do haseł LAPS';         C = 'LAPS-ACL';     N = 'C-LAPS-NONE'; T = 'Hasła LAPS dla szerokich grup' }
-    @{ Id = 'C-LAPS-READABLE';   O = 'P'; M = 'Dostęp do haseł LAPS';         C = 'LAPS-ACL';     N = 'C-LAPS-NONE'; T = 'Konto przeglądu widzi hasła LAPS' }
-    @{ Id = 'C-LAPS-READERS';    O = 'P'; M = 'Dostęp do haseł LAPS';         C = 'LAPS-ACL';     N = 'C-LAPS-NONE'; T = 'Podmioty z dostępem do haseł LAPS' }
-    @{ Id = 'DC-CIS-RIGHTS';     O = 'P'; M = 'Prawa na kontrolerach domeny'; C = 'CIS';          W = 'DC'; T = 'Przypisanie praw użytkowników na DC' }
-
-    @{ Id = 'D-TRUST-SIDF';      O = 'T'; M = 'Filtrowanie SID';              C = 'DOMAIN';       T = 'Zaufania zewnętrzne bez filtrowania SID' }
-    @{ Id = 'D-KRB-TRUST';       O = 'T'; M = 'Szyfrowanie zaufań';           C = 'KRB-ENC';      T = 'Zaufania bez AES' }
-
-    @{ Id = 'P-KRBTGT';          O = 'A'; M = 'Golden Ticket';                C = 'PRIV';         T = 'Stare hasło krbtgt' }
-    @{ Id = 'C-LAPS-NONE';       O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    T = 'LAPS nie wdrożony (schemat lub komputery)' }
-    @{ Id = 'C-LAPS-MISSING';    O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Komputery bez LAPS' }
-    @{ Id = 'C-LAPS-EXPIRED';    O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Hasło LAPS przestało się zmieniać' }
-    @{ Id = 'C-LAPS-LEGACY';     O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Przestarzały Microsoft LAPS' }
-    @{ Id = 'U-ASREP';           O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta bez preautentykacji Kerberos' }
-    @{ Id = 'U-SPN';             O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta użytkowników z SPN' }
-    @{ Id = 'D-PWDLEN';          O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Minimalna długość hasła < 12' }
-    @{ Id = 'D-PWDCPLX';         O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Złożoność haseł wyłączona' }
-    @{ Id = 'D-LOCKOUT';         O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Brak blokady konta' }
-    @{ Id = 'DC-SPOOLER';        O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'Print Spooler na DC' }
-    @{ Id = 'DC-LDAPSIGN';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'Podpisywanie LDAP niewymagane' }
-    @{ Id = 'DC-LDAPCBT';        O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'LDAP channel binding niewymuszony' }
-    @{ Id = 'DC-CIS-AUDIT';      O = 'A'; M = 'Audyt';                        C = 'CIS';          W = 'DC'; T = 'Zasady audytu DC (CIS L1)' }
-    @{ Id = 'DC-CIS-REG';        O = 'A'; M = 'Utwardzenie DC';               C = 'CIS';          W = 'DC'; T = 'Ustawienia zabezpieczeń DC (CIS L1)' }
-    @{ Id = 'DC-MSBASE';         O = 'A'; M = 'Utwardzenie DC';               C = 'CIS';          W = 'DC'; T = 'Ustawienia DC wg Microsoft Security Baseline' }
-    @{ Id = 'D-BACKUP';          O = 'A'; M = 'Kopia i odtwarzanie';          C = 'BACKUP';       T = 'Brak aktualnej kopii AD' }
-    @{ Id = 'D-RECYCLE';         O = 'A'; M = 'Kopia i odtwarzanie';          C = 'DOMAIN';       T = 'Kosz AD wyłączony' }
-    @{ Id = 'D-FFL';             O = 'S'; M = 'Przestarzałe systemy';         C = 'DOMAIN';       T = 'Poziom funkcjonalny lasu < 2016' }
-    @{ Id = 'DC-REGISTRATION';   O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-REG';       T = 'Konto DC bez kompletnej rejestracji w lesie' }
-    @{ Id = 'DC-SUBNET';         O = 'S'; M = 'Replikacja i kondycja';        C = 'SITES';        T = 'Adres DC poza podsieciami AD' }
-    @{ Id = 'P-ADMLOGIN';        O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Wbudowany Administrator używany' }
-    @{ Id = 'P-PROTECTED';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane spoza Protected Users' }
-    @{ Id = 'C-OWNER';           O = 'A'; M = 'Delegacja';                    C = 'COMP-OWNER';   T = 'Komputery z właścicielem spoza administratorów' }
-    @{ Id = 'D-OWNER-OU';        O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'OU i kontenery z właścicielem spoza administratorów' }
-    @{ Id = 'D-OWNER-GPO';       O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'GPO z właścicielem spoza administratorów' }
-    @{ Id = 'P-OWNER-GROUP';     O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'Grupy z właścicielem spoza administratorów' }
-    @{ Id = 'U-OWNER-USER';      O = 'A'; M = 'Delegacja';                    C = 'OWNERS';       T = 'Konta użytkowników z właścicielem spoza administratorów' }
-    @{ Id = 'D-PREWIN2000';      O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'Szerokie grupy w Pre-Windows 2000 Compatible Access' }
-    @{ Id = 'D-DSHEURISTICS';    O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'dSHeuristics osłabia zabezpieczenia' }
-    @{ Id = 'D-DNS-CREATECHILD'; O = 'A'; M = 'Przechwytywanie i relay';      C = 'DNS-ZONES';       T = 'Strefy DNS bez ochrony przed ADIDNS spoofing' }
-    @{ Id = 'DC-ANONLDAP';       O = 'A'; M = 'Uprawnienia domyślne';         C = 'DC-PROBE';     W = 'DC'; T = 'Anonimowe zapytania LDAP do DC' }
-    @{ Id = 'DC-NETSESSION';     O = 'A'; M = 'Uprawnienia domyślne';         C = 'DC-PROBE';     W = 'DC'; T = 'Wyliczanie sesji SMB na DC (NetCease)' }
-    @{ Id = 'D-GPO-LLMNR';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'LLMNR niewyłączony w GPO' }
-    @{ Id = 'D-GPO-HARDPATH';    O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'Hardened UNC Paths dla SYSVOL/NETLOGON' }
-    @{ Id = 'D-GPO-PSLOG';       O = 'A'; M = 'Audyt';                        C = 'GPO-ALL';      W = 'DC'; T = 'Rejestrowanie bloków skryptów PowerShell' }
-    @{ Id = 'P-ADMINMAIL';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane z adresem e-mail' }
-    @{ Id = 'D-DCSYNC';          O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Prawo replikacji haseł (DCSync) poza DC i adminami' }
-    @{ Id = 'D-ACL-DOMAIN';      O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Prawa przejęcia obiektu domeny' }
-    @{ Id = 'D-ACL-ADMINSDHOLDER'; O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';        T = 'Niestandardowe uprawnienia na AdminSDHolder' }
-    @{ Id = 'D-ACL-GPO';         O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Edycja GPO domeny/DC przez nie-adminów' }
-    @{ Id = 'P-ACL-TIER0';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Prawa nie-adminów do kont, grup i DC (Tier 0)' }
-    @{ Id = 'DC-RBCD';           O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontrolerze domeny' }
-    @{ Id = 'D-KCD-DC';          O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'Delegacja ograniczona do usług DC' }
-    @{ Id = 'D-ADCS-ESC1';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon: podmiot z żądania + uwierzytelnianie (ESC1)' }
-    @{ Id = 'D-ADCS-ESC2';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon: dowolne zastosowanie lub brak EKU (ESC2)' }
-    @{ Id = 'D-ADCS-ESC3';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon agenta rejestracji (ESC3)' }
-    @{ Id = 'D-ADCS-ESC9';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon bez rozszerzenia SID (ESC9)' }
-    @{ Id = 'D-ADCS-ESC10';      O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         W = 'WinRM'; T = 'Słabe wiązanie certyfikatów z kontami na DC (ESC10)' }
-    @{ Id = 'D-ADCS-ORPHAN';     O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'CA wycofane, ale nadal zarejestrowane w AD' }
-    @{ Id = 'D-ADCS-ESC13';      O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Zasady wystawiania powiązane z grupą (ESC13)' }
-    @{ Id = 'D-ADCS-ESC6';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'CA przyjmuje nazwę alternatywną z żądania (ESC6)' }
-    @{ Id = 'D-ADCS-ESC7';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawa ManageCA / ManageCertificates dla nie-administratorów (ESC7)' }
-    @{ Id = 'D-ADCS-ESC11';      O = 'A'; M = 'Przechwytywanie i relay';      C = 'ADCS';         T = 'CA nie wymaga szyfrowania żądań RPC (ESC11)' }
-    @{ Id = 'D-ADCS-ESC8';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'ADCS';         T = 'Web Enrollment przez HTTP z NTLM (ESC8)' }
-    @{ Id = 'D-ADCS-ESC4';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawo zmiany opublikowanych szablonów (ESC4)' }
-    @{ Id = 'D-ADCS-ESC5';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ADCS';         T = 'Prawa do obiektów PKI i serwerów CA (ESC5)' }
-    @{ Id = 'P-GMSA-READ';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Odczyt haseł gMSA: szerokie grupy, gMSA uprzywilejowane' }
-    @{ Id = 'C-RBCD';            O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontach poza DC' }
-    @{ Id = 'U-SPN-WEAK';        O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta z SPN: hasło starsze niż 3 lata, bez AES' }
-    @{ Id = 'D-FGPP-WEAK';       O = 'A'; M = 'Łamanie haseł';                C = 'FGPP';         T = 'PSO słabsze od polityki haseł domeny' }
-    @{ Id = 'D-SPN-DUP';         O = 'S'; M = 'Konfiguracja kont';            C = 'DUPLICATES';   T = 'Zduplikowane SPN' }
-    @{ Id = 'D-UPN-DUP';         O = 'S'; M = 'Konfiguracja kont';            C = 'DUPLICATES';   T = 'Zduplikowane UPN' }
-    @{ Id = 'D-GPO-UNLINKED';    O = 'S'; M = 'Porządek w konfiguracji';      C = 'GPO-LINKS';    T = 'GPO bez aktywnych łączy' }
-    @{ Id = 'D-GPO-DEADLINK';    O = 'S'; M = 'Porządek w konfiguracji';      C = 'GPO-LINKS';    T = 'Łącza do nieistniejących GPO' }
-    @{ Id = 'D-TRUST-SELAUTH';   O = 'T'; M = 'Relacje zaufania';             C = 'TRUSTS';       T = 'Zaufania bez uwierzytelniania selektywnego' }
-    @{ Id = 'D-TRUST-STALE';     O = 'T'; M = 'Relacje zaufania';             C = 'TRUSTS';       T = 'Zaufania bez zmiany hasła > 90 dni' }
-)
 # ---------- mapowanie na NIS2 / UKSC i ISO/IEC 27001:2022 ----------
 # Rodzaj ryzyka (M z katalogu reguł) -> środki z art. 21 ust. 2 NIS2 (wdrożone w UKSC, Dz. U. 2026 poz. 252) i zabezpieczenia z załącznika A ISO/IEC 27001:2022.
 # To wskazanie, których środków dotyczy znalezisko techniczne AD - nie ocena zgodności podmiotu.
@@ -929,6 +960,9 @@ function Add-Finding([hashtable]$F) {
         MDI            = (Get-MdiRef $F.Id)
         Objects        = $obj
         Detail         = @($F.Detail | Where-Object { $_ })   # pełna lista do _obiekty.csv, gdy Objects są zagregowane
+        # Pewność wyniku: Wysoka (stan odczytany wprost), Średnia (źródło pośrednie, np. GPO zamiast rejestru DC), Niska (źródło pośrednie i niepełne)
+        Pewnosc        = $(if ($F.Confidence) { [string]$F.Confidence } else { 'Wysoka' })
+        PewnoscUwagi   = [string]$F.ConfidenceNote
     }
     if ($F.Severity -ne 'Info' -and $complianceMap.ContainsKey($row.Model)) {
         $row.NIS2     = $complianceMap[$row.Model].N
@@ -947,19 +981,6 @@ function Add-IfAny([hashtable]$F) {
     }
 }
 
-# Nazwy testów w konsoli
-$checkLabels = @{
-    'PRIV' = 'Konta uprzywilejowane'; 'USERS' = 'Konta użytkowników'; 'COMPUTERS' = 'Komputery, systemy i LAPS'
-    'COMP-OWNER' = 'Właściciele kont komputerów'; 'OWNERS' = 'Właściciele OU, GPO, grup i kont'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'; 'ACL-TIER0' = 'Uprawnienia Tier 0, delegacja do DC'
-    'LAPS-ACL' = 'Dostęp do haseł LAPS'; 'KRB-ENC' = 'Kerberos: szyfrowanie DES/RC4'; 'DOMAIN' = 'Domena, las, hasła, DNS'
-    'DC-OS' = 'Systemy kontrolerów domeny'; 'DC-GPO' = 'GPO kontrolerów domeny'; 'GPO-ALL' = 'GPO w całej domenie'; 'GPP' = 'Hasła w preferencjach GPO (SYSVOL)'; 'GPO-ADMINS' = 'Lokalni administratorzy z GPO'
-    'CIS' = 'Konfiguracja DC (CIS i Microsoft)'; 'DC-PATCH' = 'Aktualizacje kontrolerów domeny'; 'REPL' = 'Replikacja AD'
-    'BACKUP' = 'Kopia zapasowa AD'; 'SYSVOL-FRS' = 'Replikacja SYSVOL'; 'FSMO' = 'Role FSMO'; 'DC-REG' = 'Rejestracja kontrolerów domeny'
-    'SITES' = 'Lokacje i podsieci'; 'DC-MACHINEPWD' = 'Hasła kont komputerów DC'; 'DC-NET' = 'Porty i udziały DC'
-    'GPO-SYNC' = 'Spójność GPO (AD / SYSVOL)'; 'DC-DNS' = 'Rekordy DNS kontrolerów'
-    'FGPP' = 'Szczegółowe zasady haseł (PSO)'; 'DUPLICATES' = 'Zduplikowane SPN i UPN'; 'GPO-LINKS' = 'GPO bez łączy'; 'TRUSTS' = 'Relacje zaufania'
-    'ADCS' = 'Usługi certyfikatów (AD CS)'
-}
 # -IncludeCheck / -ExcludeCheck. Klucz testu: nazwa Invoke-Check; sondy pojedynczych DC i DC-GPO wybiera się razem jako DC-PROBE,
 # strefy DNS (DNS-ZONES w katalogu reguł) są częścią testu DOMAIN.
 function Get-CheckKey([string]$Name, [string[]]$Known) {
@@ -983,7 +1004,7 @@ $checkUnknown = [System.Collections.Generic.List[string]]::new()
 $checkInclude = [string[]]@(Resolve-CheckList $IncludeCheck $ruleCatalog $checkKnown $checkUnknown | Select-Object -Unique)
 $checkExclude = [string[]]@(Resolve-CheckList $ExcludeCheck $ruleCatalog $checkKnown $checkUnknown | Select-Object -Unique)
 if ($checkUnknown.Count) {
-    throw "Nieznany test lub reguła w -IncludeCheck / -ExcludeCheck: $($checkUnknown -join ', '). Dostępne testy: $($checkKnown -join ', '); można też podać Id reguły (np. D-ADCS-ESC1)."
+    throw "Nieznany test lub reguła w -IncludeCheck / -ExcludeCheck: $($checkUnknown -join ', '). Dostępne testy: $($checkKnown -join ', '); można też podać Id reguły (np. D-ADCS-ESC1). Pełna lista testów i reguł: -ListChecks."
 }
 $partialRun = [bool]($checkInclude.Count -or $checkExclude.Count)
 function Test-CheckSelected([string]$Name) {
@@ -1083,6 +1104,11 @@ function Get-NtpSourceIssue($Ntp) {
     if ($Ntp.RefId -eq 'LOCL') { return 'zegar lokalny serwera (Local CMOS Clock) - brak zewnętrznego źródła czasu' }
     if ($Ntp.Leap -eq 3 -or $Ntp.Stratum -eq 0 -or $Ntp.Stratum -ge 16) { return 'zegar niezsynchronizowany (usługa czasu nie ma działającego źródła)' }
     ''
+}
+# Waga DC-TIME-SOURCE wg problemu: brak synchronizacji = czas domeny płynie swobodnie (High); zegar lokalny = brak zewnętrznego
+# wzorca (Medium); host wirtualizacji = czas zależny od hosta, zwykle poprawny, ale poza kontrolą domeny (Low)
+function Get-NtpSourceSeverity([string]$Issue) {
+    if ($Issue -match 'niezsynchronizowany') { 'High' } elseif ($Issue -match 'zegar lokalny') { 'Medium' } else { 'Low' }
 }
 # Zapytanie NTP (UDP 123, tryb klienta) - zwykłe konto, bez uprawnień; $null przy braku odpowiedzi
 function Get-NtpInfo([string]$Computer, [int]$TimeoutMs = 3000) {
@@ -1219,6 +1245,22 @@ function Test-GpoSecurityFilter([string[]]$Allow, [string[]]$Deny, [object[]]$To
     }
     if (-not $no) { 'Tak' } elseif (-not $yes) { 'Nie' } else { 'Czesc' }
 }
+# Hasła w pliku preferencji GPO: atrybut cpassword (Groups.xml, Services.xml, ScheduledTasks.xml, DataSources.xml, Drives.xml, Printers.xml)
+# albo hasło autologowania DefaultPassword jawnym tekstem (Registry.xml). Zwraca Element, Konto, Typ - bez wartości hasła.
+function Get-GppPasswordEntry($Xml, [string]$FileName) {
+    if (-not $Xml) { return }
+    if ($FileName -eq 'Registry.xml') {
+        foreach ($n in @($Xml.SelectNodes("//Properties[@name='DefaultPassword' and @value!='']"))) {
+            [pscustomobject]@{ Element = $n.ParentNode.GetAttribute('name'); Konto = ''; Typ = 'hasło autologowania (DefaultPassword) jawnym tekstem' }
+        }
+    } else {
+        foreach ($n in @($Xml.SelectNodes("//*[@cpassword!='']"))) {
+            $acc = ''
+            foreach ($a in 'userName', 'runAs', 'accountName', 'username', 'newName') { if ($n.GetAttribute($a)) { $acc = $n.GetAttribute($a); break } }
+            [pscustomobject]@{ Element = $n.ParentNode.GetAttribute('name'); Konto = $acc; Typ = 'cpassword (każdy użytkownik domeny może odszyfrować)' }
+        }
+    }
+}
 # Podmioty dodawane przez GPO do lokalnej grupy Administrators - "Grupy z ograniczeniami" w GptTmpl.inf, sekcja [Group Membership]:
 #   *S-1-5-32-544__Members = *S-1-5-21-...-1105,FIRMA\helpdesk    (członkowie grupy Administrators)
 #   *S-1-5-21-...-1105__Memberof = *S-1-5-32-544                   (grupa dodawana do Administrators)
@@ -1245,6 +1287,16 @@ function Get-GppLocalAdmin($Xml) {
             if ($m.GetAttribute('sid')) { $m.GetAttribute('sid') } else { $m.GetAttribute('name') }
         }
     }
+}
+# Pewność wyników odczytanych z GPO kontrolerów domeny (bez -UseWinRM): GPO opisuje konfigurację zamierzoną, a nie stan DC.
+# Niska, gdy część GPO ma niepewny zakres (filtr WMI, filtrowanie zabezpieczeń), nie ma plików w SYSVOL albo jest nieczytelna.
+function Get-DcGpoConfidence {
+    $why = @()
+    if ($gpoDcNotes.Count)    { $why += "GPO o niepewnym zakresie lub pominięte: $($gpoDcNotes.Count)" }
+    if ($gpoNoFiles.Count)    { $why += "GPO bez folderu w SYSVOL: $($gpoNoFiles.Count)" }
+    if ($gpoReadErrors.Count) { $why += "GPO lub pliki nieczytelne dla konta przeglądu: $($gpoReadErrors.Count)" }
+    if ($why.Count) { @{ C = 'Niska'; N = "wartości z GPO (konfiguracja zamierzona), odczyt niepełny - $($why -join '; '); stan rzeczywisty DC potwierdza -UseWinRM" } }
+    else { @{ C = 'Średnia'; N = 'wartości z GPO (konfiguracja zamierzona); stan rzeczywisty DC potwierdza przebieg z -UseWinRM' } }
 }
 # Uwagi o pierwszeństwie i filtrach GPO kontrolerów domeny (do opisów DC-CIS-*): klucz = nazwa GPO lub DN kontenera
 $gpoDcNotes = [ordered]@{}
@@ -2727,6 +2779,33 @@ Invoke-Check 'ACL-TIER0' {
 # Stan wiązania certyfikatów z kontami na DC z wartości rejestru (ESC10, doprecyzowanie ESC9).
 # Kdc\StrongCertificateBindingEnforcement: 0 = wyłączone, 1 = tryb zgodności, 2 lub brak = pełne wymuszanie (brak: domyślne od aktualizacji
 # z lutego 2025; aktualizacje od września 2025 ignorują wartość). Schannel\CertificateMappingMethods: bit 0x4 = mapowanie po UPN.
+# SID-y z prawem rejestracji certyfikatu w szablonie: Enroll, AutoEnroll, wszystkie prawa rozszerzone albo pełna kontrola
+# (wpisy Allow, bez InheritOnly). Bez oceny, czy podmiot jest administratorem.
+function Get-TemplateEnrollSid($Sd) {
+    if ($Sd -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { return }
+    $R = [System.DirectoryServices.ActiveDirectoryRights]
+    $enrollG = @([guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55', [guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2', [guid]::Empty)   # Enroll, AutoEnroll, wszystkie prawa rozszerzone
+    $Sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
+        $_.AccessControlType -eq 'Allow' -and -not ($_.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -and
+        ((($_.ActiveDirectoryRights -band $R::GenericAll) -eq $R::GenericAll) -or (($_.ActiveDirectoryRights -band $R::ExtendedRight) -and ($enrollG -contains $_.ObjectType))) } |
+        ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique
+}
+# Warunki ESC w konfiguracji szablonu (bez oceny, kto może rejestrować): msPKI-Certificate-Name-Flag, msPKI-Enrollment-Flag,
+# msPKI-RA-Signature i lista EKU (pKIExtendedKeyUsage + msPKI-Certificate-Application-Policy).
+#   Open   - bez zatwierdzania przez menedżera CA (bit 2) i bez podpisu agenta rejestracji
+#   AnyEku - brak EKU lub Any Purpose; Auth - certyfikat nadaje się do logowania
+#   Esc1   - podmiot z żądania (bit 1) + logowanie; Esc2 - dowolne zastosowanie; Esc3 - agent rejestracji; Esc9 - bez rozszerzenia SID (0x80000) + logowanie
+function Get-TemplateEscFlag([int64]$NameFlag, [int64]$EnrollFlag, [int]$RaSignature, [string[]]$Ekus) {
+    $authEku = @('1.3.6.1.5.5.7.3.2', '1.3.6.1.5.2.3.4', '1.3.6.1.4.1.311.20.2.2', '2.5.29.37.0')
+    $e = @($Ekus | Where-Object { $_ })
+    $anyEku = (-not $e.Count) -or ($e -contains '2.5.29.37.0')
+    $auth   = $anyEku -or [bool]@($e | Where-Object { $authEku -contains $_ }).Count
+    [pscustomobject]@{
+        Open = (-not ($EnrollFlag -band 2) -and $RaSignature -le 0); AnyEku = $anyEku; Auth = $auth
+        Esc1 = [bool](($NameFlag -band 1) -and $auth); Esc2 = $anyEku
+        Esc3 = ($e -contains '1.3.6.1.4.1.311.20.2.1'); Esc9 = [bool](($EnrollFlag -band 0x80000) -and $auth)
+    }
+}
 function Get-CertBindingState($Kdc, $Map) {
     $kdcTxt = if ($null -eq $Kdc) { 'nieustawione (pełne wymuszanie na DC z aktualizacjami od lutego 2025)' }
               elseif ([int]$Kdc -ge 2) { "$Kdc (pełne wymuszanie)" } elseif ([int]$Kdc -eq 1) { '1 (tryb zgodności)' } else { '0 (wyłączone)' }
@@ -2851,9 +2930,6 @@ Invoke-Check 'ADCS' {
     $tpls = @(Find-Ldap -SearchBase "CN=Certificate Templates,$pks" -Scope OneLevel -Filter '(objectClass=pKICertificateTemplate)' -SecurityDescriptor `
               -Properties displayName, 'msPKI-Certificate-Name-Flag', 'msPKI-Enrollment-Flag', 'msPKI-RA-Signature', pKIExtendedKeyUsage,
                           'msPKI-Certificate-Application-Policy', 'msPKI-Certificate-Policy', nTSecurityDescriptor)
-    $R = [System.DirectoryServices.ActiveDirectoryRights]
-    $enrollG = @([guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55', [guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2', [guid]::Empty)   # Enroll, AutoEnroll, wszystkie prawa rozszerzone
-    $authEku = @('1.3.6.1.5.5.7.3.2', '1.3.6.1.5.2.3.4', '1.3.6.1.4.1.311.20.2.2', '2.5.29.37.0')
     $esc = @{ 1 = @(); 2 = @(); 3 = @(); 4 = @(); 9 = @(); 13 = @() }
     foreach ($t in $tpls) {
         $onCa = $pub["$($t.name)".ToLower()]
@@ -2863,17 +2939,11 @@ Invoke-Check 'ADCS' {
         $tName = $(if ($t.displayname -and "$($t.displayname)" -ne "$($t.name)") { "$($t.displayname) ($($t.name))" } else { "$($t.name)" })
 
         # Kto spoza administratorów może zarejestrować certyfikat
-        $enr = @($sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
-                    $_.AccessControlType -eq 'Allow' -and -not ($_.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -and
-                    ((($_.ActiveDirectoryRights -band $R::GenericAll) -eq $R::GenericAll) -or (($_.ActiveDirectoryRights -band $R::ExtendedRight) -and ($enrollG -contains $_.ObjectType))) } |
-                 ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique | Where-Object { & $isLow $_ })
+        $enr = @(Get-TemplateEnrollSid $sd | Where-Object { & $isLow $_ })
         $ekus  = @(@($t.pkiextendedkeyusage) + @($t.'mspki-certificate-application-policy') | Where-Object { $_ } | ForEach-Object { "$_" } | Sort-Object -Unique)
-        $nameF = [int64]$t.'mspki-certificate-name-flag'
-        $enrF  = [int64]$t.'mspki-enrollment-flag'
-        $open  = -not ($enrF -band 2) -and [int]$t.'mspki-ra-signature' -le 0    # bez zatwierdzania przez menedżera CA i bez podpisu agenta
-        $anyEku = (-not $ekus.Count) -or ($ekus -contains '2.5.29.37.0')
-        $auth   = $anyEku -or [bool]@($ekus | Where-Object { $authEku -contains $_ }).Count
-        if ($enr.Count -and $open) {
+        $tf    = Get-TemplateEscFlag ([int64]$t.'mspki-certificate-name-flag') ([int64]$t.'mspki-enrollment-flag') ([int]$t.'mspki-ra-signature') $ekus
+        $auth  = $tf.Auth
+        if ($enr.Count -and $tf.Open) {
             $row = { param($Extra)
                 $o = [ordered]@{
                     Szablon = $tName; CA = ($onCa -join ', '); Rejestracja = (@($enr | ForEach-Object { & $sidText $_ }) -join ', ')
@@ -2884,10 +2954,10 @@ Invoke-Check 'ADCS' {
                 $o['Szerokie'] = [bool]@($enr | Where-Object { $broad.ContainsKey($_) }).Count
                 [pscustomobject]$o
             }
-            if (($nameF -band 1) -and $auth) { $esc[1] += & $row $null }
-            if ($anyEku) { $esc[2] += & $row $null }
-            if ($ekus -contains '1.3.6.1.4.1.311.20.2.1') { $esc[3] += & $row $null }
-            if (($enrF -band 0x80000) -and $auth) { $esc[9] += & $row $null }
+            if ($tf.Esc1) { $esc[1] += & $row $null }
+            if ($tf.Esc2) { $esc[2] += & $row $null }
+            if ($tf.Esc3) { $esc[3] += & $row $null }
+            if ($tf.Esc9) { $esc[9] += & $row $null }
             foreach ($pol in @($t.'mspki-certificate-policy' | Where-Object { $_ })) {
                 if ($auth -and $oidGroup.ContainsKey("$pol")) {
                     $gDn = $oidGroup["$pol"]; $gObj = $null
@@ -2937,6 +3007,7 @@ Invoke-Check 'ADCS' {
 
     # Testy, których wyniku nie udało się ustalić dla danego CA (brak łączności, brak interfejsu) - osobne znalezisko Info i status reguły
     $adcsUnk = [System.Collections.Generic.List[object]]::new()
+    $caPending = [System.Collections.Generic.List[object]]::new()   # instancje odczytu CA po przekroczeniu czasu
 
     # ESC8: Web Enrollment (/certsrv) po HTTP z uwierzytelnianiem NTLM - przekazanie (relay) uwierzytelnienia DC daje certyfikat DC.
     # Rozstrzygnięte: odpowiedź HTTP albo odrzucone połączenie (RST - na TCP 80 nic nie nasłuchuje). Przekroczony czas = zapora, wynik nieznany.
@@ -2991,6 +3062,10 @@ Invoke-Check 'ADCS' {
             $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = 'ESC6, ESC7, ESC11 (konfiguracja CA)'; Przyczyna = 'brak łączności RPC (TCP 135) z serwerem CA' }); continue
         }
         $res = $null; $ar = $null
+        # Odczyt w osobnej instancji z limitem 30 s: wywołanie DCOM do CA potrafi wisieć na zablokowanych portach RPC.
+        # Celowo BeginStop (asynchronicznie) i Dispose tylko po zakończeniu - Stop() i Dispose() działającej instancji czekają
+        # na powrót z wywołania COM, więc zawiesiłyby przegląd mimo limitu czasu. Instancja, która nie zdążyła się zakończyć,
+        # trafia do $caPending i jest zwalniana po sprawdzeniu wszystkich CA, o ile do tego czasu się zakończyła.
         $ps = [powershell]::Create()
         try {
             [void]$ps.AddScript($caRead.ToString()).AddArgument($cfg)
@@ -2998,7 +3073,9 @@ Invoke-Check 'ADCS' {
             if ($ar.AsyncWaitHandle.WaitOne(30000)) { $res = @($ps.EndInvoke($ar))[0] }
             else { [void]$ps.BeginStop($null, $null) }
         } catch { $res = @{ Blad = @("$($_.Exception.Message)") } }
-        if ($ar -and $ar.IsCompleted) { $ps.Dispose() }
+        finally {
+            if ($ar -and $ar.IsCompleted) { $ps.Dispose() } else { $caPending.Add([pscustomobject]@{ Ps = $ps; Ar = $ar }) }
+        }
         if (-not $res) {
             $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = 'ESC6, ESC7, ESC11 (konfiguracja CA)'; Przyczyna = 'przekroczony czas odczytu (30 s) - zapora blokuje dynamiczne porty RPC?' }); continue
         }
@@ -3029,6 +3106,10 @@ Invoke-Check 'ADCS' {
         if (@($res.Blad).Count) {
             $adcsUnk.Add([pscustomobject]@{ CA = "$($ca.name)"; Test = 'ESC6, ESC7, ESC11 (konfiguracja CA)'; Przyczyna = (@($res.Blad) -join '; ') })
         }
+    }
+    # Instancje po przekroczeniu czasu: zwolnienie tych, które zdążyły się zakończyć (pozostałe kończą się z procesem)
+    foreach ($pend in $caPending) {
+        if (-not $pend.Ar -or $pend.Ar.IsCompleted) { try { $pend.Ps.Dispose() } catch { $null = $_ } }
     }
     # Reguła bez znaleziska, której nie udało się sprawdzić dla żadnego CA: status zamiast fałszywego zaliczenia
     if (-not $web.Count -and @($adcsUnk | Where-Object Test -like 'ESC8*').Count) { $ruleNote['D-ADCS-ESC8'] = 'Nierozstrzygnięty (brak łączności HTTP z CA)' }
@@ -3120,6 +3201,8 @@ Invoke-Check 'ADCS' {
                 else { ' Trybu DC nie odczytano (wymaga -UseWinRM), więc ryzyko jest warunkowe.' }
     Add-IfAny @{
         Id = 'D-ADCS-ESC9'; Category = $catPki; Severity = $(if ($esc9Full) { 'Low' } else { & $sevOf $esc[9] 'Medium' 'Low' })
+        Confidence = $(if ($bindRead -eq $dcs.Count) { 'Wysoka' } else { 'Średnia' })
+        ConfidenceNote = $(if ($bindRead -eq $dcs.Count) { '' } else { 'ryzyko zależy od trybu wiązania certyfikatów na DC, którego nie odczytano ze wszystkich DC (wymaga -UseWinRM)' })
         Title = 'Szablony certyfikatów bez rozszerzenia zabezpieczeń SID (ESC9)'
         Objects = (& $show $esc[9])
         Description = 'Szablon ma flagę CT_FLAG_NO_SECURITY_EXTENSION, więc certyfikat nie zawiera SID właściciela i DC wiąże go z kontem tylko po nazwie. Kto ma prawo zapisu do innego konta (np. zmiany UPN), może uzyskać certyfikat podszywający się pod administratora. Ryzyko znika, gdy wszystkie DC działają w trybie pełnego wymuszania silnego mapowania certyfikatów (StrongCertificateBindingEnforcement = 2, domyślnie od aktualizacji z 2025 r.).' + $esc9Note
@@ -4027,8 +4110,11 @@ public static class PepixNetApi {
         Fix = (Fx 'Set-SmbServerConfiguration -AuditSmb1Access $true -Force   # najpierw audyt', 'Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force', 'Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol', 'Uninstall-WindowsFeature FS-SMB1   # Windows Server; wymaga restartu')
         Mitre = 'T1210'
     }
+    # Bez -UseWinRM wartości LDAP/NTLM pochodzą z GPO, z -UseWinRM - z rejestru każdego DC
+    $dcProbeConf = if ($UseWinRM) { @{ C = 'Wysoka'; N = '' } } else { Get-DcGpoConfidence }
     Add-IfAny @{
         Id = 'DC-LDAPSIGN'; Category = $catDC; Severity = 'Medium'; Title = 'Podpisywanie LDAP nie jest wymagane'; Objects = $dcLdap
+        Confidence = $dcProbeConf.C; ConfidenceNote = $dcProbeConf.N
         Description = 'Bez wymogu podpisywania możliwy jest relay NTLM do LDAP, np. dodanie konta do grupy lub ustawienie RBCD w imieniu ofiary.'
         Recommendation = 'Najpierw włączyć logowanie zdarzeń 2889 (niepodpisane powiązania) i poprawić klientów, potem w GPO Default Domain Controllers Policy ustawić "Kontroler domeny: wymagania podpisywania serwera LDAP" = Wymagaj podpisywania.'
         Fix = (Fx 'reg add HKLM\SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics /v "16 LDAP Interface Events" /t REG_DWORD /d 2 /f   # na DC: logowanie 2889', '# po weryfikacji klientów: GPO > Security Options > Domain controller: LDAP server signing requirements = Require signing')
@@ -4036,6 +4122,7 @@ public static class PepixNetApi {
     }
     Add-IfAny @{
         Id = 'DC-LDAPCBT'; Category = $catDC; Severity = 'Medium'; Title = 'LDAP channel binding nie jest wymuszony'; Objects = $dcCbt
+        Confidence = $dcProbeConf.C; ConfidenceNote = $dcProbeConf.N
         Description = 'Bez channel binding możliwy jest relay NTLM do LDAPS (LDAP po TLS), który podpisywanie LDAP nie obejmuje.'
         Recommendation = 'Ustawić "Kontroler domeny: wymagania tokenu powiązania kanału serwera LDAP" najpierw na "Gdy obsługiwane" (1) i obserwować zdarzenia 3039, potem "Zawsze" (2).'
         Fix = (Fx '# GPO > Security Options > Domain controller: LDAP server channel binding token requirements = When supported, potem Always')
@@ -4043,6 +4130,7 @@ public static class PepixNetApi {
     }
     Add-IfAny @{
         Id = 'DC-NTLMV1'; Category = $catDC; Severity = 'Medium'; Title = 'DC akceptuje NTLMv1/LM (LmCompatibilityLevel < 5)'; Objects = $dcNtlm
+        Confidence = $dcProbeConf.C; ConfidenceNote = $dcProbeConf.N
         Description = 'Odpowiedzi NTLMv1 można złamać do skrótu NT konta (w tym konta komputera DC), co daje pass-the-hash.'
         Recommendation = 'Najpierw audyt: zdarzenia 4624 na DC z "Package Name (NTLM only): NTLM V1". Po usunięciu klientów NTLMv1 ustawić w GPO poziom uwierzytelniania LAN Manager = "Wysyłaj tylko odpowiedź NTLMv2. Odmawiaj LM i NTLM".'
         Fix = (Fx 'Get-WinEvent -FilterHashtable @{LogName=''Security'';Id=4624} -MaxEvents 5000 | Where-Object { $_.Message -match ''NTLM V1'' }   # na DC', '# GPO > Security Options > Network security: LAN Manager authentication level = Send NTLMv2 response only. Refuse LM & NTLM')
@@ -4171,18 +4259,8 @@ if (-not $SkipDCChecks) {
             $part = if ($fi.FullName -match '\\(Machine|User)\\Preferences\\') { $Matches[1] } else { '' }
             $x = $null
             try { $x = [xml](Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction Stop) } catch { continue }
-            if ($fi.Name -eq 'Registry.xml') {
-                foreach ($n in @($x.SelectNodes("//Properties[@name='DefaultPassword' and @value!='']"))) {
-                    [pscustomobject]@{ GPO = $gpo; Czesc = $part; Plik = $fi.Name; Element = $n.ParentNode.GetAttribute('name'); Konto = ''
-                                       Typ = 'hasło autologowania (DefaultPassword) jawnym tekstem' }
-                }
-            } else {
-                foreach ($n in @($x.SelectNodes("//*[@cpassword!='']"))) {
-                    $acc = ''
-                    foreach ($a in 'userName', 'runAs', 'accountName', 'username', 'newName') { if ($n.GetAttribute($a)) { $acc = $n.GetAttribute($a); break } }
-                    [pscustomobject]@{ GPO = $gpo; Czesc = $part; Plik = $fi.Name; Element = $n.ParentNode.GetAttribute('name'); Konto = $acc
-                                       Typ = 'cpassword (każdy użytkownik domeny może odszyfrować)' }
-                }
+            foreach ($e in @(Get-GppPasswordEntry $x $fi.Name)) {
+                [pscustomobject]@{ GPO = $gpo; Czesc = $part; Plik = $fi.Name; Element = $e.Element; Konto = $e.Konto; Typ = $e.Typ }
             }
         }
         $rows = @($rows)
@@ -4252,6 +4330,7 @@ if (-not $SkipDCChecks) {
         if (-not $rows.Count -and $unread) { $ruleNote['D-GPO-LOCALADMIN'] = "Nierozstrzygnięty ($unread plików GPO nieczytelnych dla konta przeglądu)" }
         Add-IfAny @{
             Id = 'D-GPO-LOCALADMIN'; Category = $catDom
+            Confidence = 'Średnia'; ConfidenceNote = 'treść GPO bez oceny filtrowania zabezpieczeń i filtrów WMI; rzeczywiste członkostwo na komputerach może się różnić'
             Severity = $(if (@($rows | Where-Object SzerokaGrupa -eq 'Tak').Count) { 'Critical' } elseif (@($rows | Where-Object ObejmujeDC -eq 'Tak').Count) { 'High' } else { 'Low' })
             Title = 'Konta i grupy spoza administratorów dodawane przez GPO do lokalnych administratorów'
             Objects = $rows
@@ -4537,8 +4616,11 @@ if (-not $SkipDCChecks) {
         $rightsNote = "Przypisania praw odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona$(if ($UseWinRM) { ', także przy -UseWinRM' })).$gpoMissing"
         $summaryNote = if ($UseWinRM) { "Opcje zabezpieczeń, szablony administracyjne i audyt odczytano z rejestru i auditpol każdego DC (stan rzeczywisty); przypisania praw - z GPO (konfiguracja zamierzona).$gpoMissing" } else { $gpoNote }
 
+        $gpoConf = Get-DcGpoConfidence                                              # przypisania praw: zawsze z GPO
+        $regConf = if ($UseWinRM) { @{ C = 'Wysoka'; N = '' } } else { $gpoConf }   # rejestr i audyt: z -UseWinRM stan rzeczywisty
         Add-IfAny @{
             Id = 'DC-CIS-REG'; Category = $catCis; Severity = (Get-TopSeverity $regF)
+            Confidence = $regConf.C; ConfidenceNote = $regConf.N
             Title = 'Opcje zabezpieczeń i szablony administracyjne DC niezgodne z CIS L1'
             Objects = $regF
             Description = "Ustawienia zabezpieczeń kontrolerów domeny odbiegają od CIS Benchmark (profil L1 dla DC): m.in. ochrona poświadczeń (WDigest, LSA Protection), podpisywanie SMB, szyfrowanie Kerberos, rozwiązywanie nazw (LLMNR), WinRM i logowanie PowerShell. $gpoNote"
@@ -4547,6 +4629,7 @@ if (-not $SkipDCChecks) {
         }
         Add-IfAny @{
             Id = 'DC-CIS-AUDIT'; Category = $catCis; Severity = (Get-TopSeverity $audF)
+            Confidence = $regConf.C; ConfidenceNote = $regConf.N
             Title = 'Zasady audytu DC niezgodne z CIS L1'
             Objects = $audF
             Description = "Brak audytu tych zdarzeń oznacza, że logowania, zmiany grup uprzywilejowanych, zmiany w AD i użycie uprawnień nie zostaną zarejestrowane - SIEM/SOC nie wykryje ataku, a analiza incydentu będzie niemożliwa. $gpoNote"
@@ -4556,6 +4639,7 @@ if (-not $SkipDCChecks) {
         }
         Add-IfAny @{
             Id = 'DC-CIS-RIGHTS'; Category = $catCis; Severity = (Get-TopSeverity $rigF)
+            Confidence = $gpoConf.C; ConfidenceNote = $gpoConf.N
             Title = 'Przypisanie praw użytkowników na DC niezgodne z CIS L1'
             Objects = $rigF
             Description = "Prawa takie jak logowanie lokalne lub przez RDP na DC, ładowanie sterowników, kopia zapasowa/przywracanie plików czy debugowanie programów pozwalają przejąć kontroler domeny. Domyślna Default Domain Controllers Policy nadaje część z nich grupom operatorów (Account/Server/Print/Backup Operators). $rightsNote"
@@ -4567,6 +4651,7 @@ if (-not $SkipDCChecks) {
         $msGap = @($cisRows | Where-Object { $_.ZgodneMS -eq 'Nie' -and $_.Zgodne -ne 'Nie' -and -not $_.InnyTest })
         Add-IfAny @{
             Id = 'DC-MSBASE'; Category = $catCis; Severity = (Get-TopSeverity $msGap)
+            Confidence = $regConf.C; ConfidenceNote = $regConf.N
             Title = 'Ustawienia DC niezgodne z Microsoft Security Baseline (poza lukami CIS)'
             Objects = ($msGap | Select-Object Ustawienie, DC, Obszar, Microsoft, Aktualne, Zrodlo, Waga, Zgodne)
             Description = "Ustawienia, w których konfiguracja kontrolerów domeny odbiega od zaleceń Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller), a nie zostały już zgłoszone jako niezgodność z CIS. Kolumna Zgodne pokazuje wynik wg CIS ('poza CIS' = ustawienia nie ma w wybranych kontrolach CIS). Microsoft i CIS różnią się w kilku miejscach - np. Microsoft blokuje ładowanie własnych SSP do LSASS, a nie wymaga zakazu przechowywania poświadczeń sieciowych. $gpoNote"
@@ -4981,7 +5066,7 @@ if (-not $SkipDCChecks) {
                 Objects = $timeRows
                 Description = 'Kerberos odrzuca uwierzytelnienie przy różnicy czasu powyżej 5 minut. Rozjechany czas DC powoduje losowe błędy logowania i replikacji.'
                 Recommendation = 'DC synchronizują czas z hierarchii domeny (NT5DS), a tylko PDC Emulator z zewnętrznego źródła NTP. Na maszynach wirtualnych wyłączyć synchronizację czasu z hypervisorem.'
-                Fix = (Fx 'w32tm /config /syncfromflags:domhier /update   # na DC innym niż PDC', 'w32tm /config /manualpeerlist:"0.pl.pool.ntp.org 1.pl.pool.ntp.org" /syncfromflags:manual /reliable:yes /update   # na PDC', 'w32tm /resync /rediscover')
+                Fix = (Fx 'w32tm /config /syncfromflags:domhier /update   # na DC innym niż PDC', 'w32tm /config /manualpeerlist:"0.pl.pool.ntp.org,0x8 1.pl.pool.ntp.org,0x8" /syncfromflags:manual /reliable:yes /update   # na PDC', 'w32tm /resync /rediscover')
             }
         }
 
@@ -5003,13 +5088,15 @@ if (-not $SkipDCChecks) {
                 $srcRow = [pscustomobject]@{ PDC = $pdc; Problem = $issue; Stratum = $ntp.Stratum; IdentyfikatorZrodla = $ntp.RefId; Zsynchronizowany = $(if ($ntp.Leap -eq 3) { 'Nie' } else { 'Tak' }) }
                 if ($w32) { $srcRow | Add-Member -NotePropertyName ZrodloW32tm -NotePropertyValue $w32 }
                 Add-Finding @{
-                    Id = 'DC-TIME-SOURCE'; Category = $catHealth; Severity = 'Medium'
+                    Id = 'DC-TIME-SOURCE'; Category = $catHealth; Severity = (Get-NtpSourceSeverity $issue)
+                    Confidence = $(if ($w32) { 'Wysoka' } else { 'Średnia' })
+                    ConfidenceNote = $(if ($w32) { '' } else { 'wynik z odpowiedzi NTP; potwierdzić na PDC poleceniem w32tm /query /source (albo przebiegiem z -UseWinRM)' })
                     Title = "PDC Emulator nie ma wiarygodnego źródła czasu: $issue"
                     Objects = @($srcRow)
                     Description = 'Wszystkie kontrolery domeny i stacje biorą czas z PDC Emulatora, a Kerberos odrzuca logowanie przy różnicy powyżej 5 minut. Gdy PDC synchronizuje się z zegarem hosta wirtualizacji albo z własnym zegarem sprzętowym, błąd lub dryf tego zegara przenosi się na całą domenę - także wtedy, gdy na PDC wpisano serwery NTP, bo dostawca czasu Hyper-V ma pierwszeństwo. Test DC-TIME tego nie wykryje: mierzy tylko różnicę pozostałych DC względem PDC.'
                     Recommendation = 'Na PDC Emulatorze ustawić zewnętrzne źródła NTP i oznaczyć go jako wiarygodne źródło czasu. Na wirtualnym PDC wyłączyć dostawcę czasu Hyper-V (VMICTimeProvider) w rejestrze maszyny - usługa integracji może pozostać włączona. Pozostałe DC zostawić na hierarchii domeny (NT5DS). Po zmianie sprawdzić źródło poleceniem w32tm /query /source.'
                     Fix = (Fx 'w32tm /query /status   # na PDC: źródło, warstwa, ostatnia synchronizacja',
-                              'w32tm /config /manualpeerlist:"0.pl.pool.ntp.org 1.pl.pool.ntp.org,0x8" /syncfromflags:manual /reliable:yes /update   # na PDC',
+                              'w32tm /config /manualpeerlist:"0.pl.pool.ntp.org,0x8 1.pl.pool.ntp.org,0x8" /syncfromflags:manual /reliable:yes /update   # na PDC',
                               'reg add HKLM\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\VMICTimeProvider /v Enabled /t REG_DWORD /d 0 /f   # na wirtualnym PDC',
                               'Restart-Service w32time; w32tm /resync /rediscover; w32tm /query /source')
                 }
@@ -5203,6 +5290,20 @@ $ruleStatus = @(foreach ($r in $ruleCatalog) {
     }
 })
 
+# Czy status oznacza regułę ocenioną (znalezisko, zaliczona, także warunkowo, albo nie dotyczy)
+function Test-RuleEvaluated([string]$Status) {
+    ($Status -in @('Znalezisko', 'Zaliczony')) -or ($Status -like 'Nie dotyczy*') -or ($Status -like 'Zaliczony warunkowo*')
+}
+# Pokrycie obszarów: ile reguł obszaru faktycznie oceniono. Niski odsetek = wynik obszaru może być zaniżony.
+$areaCoverage = [ordered]@{}
+foreach ($k in $areaNames.Keys) {
+    $n  = $areaNames[$k]
+    $rs = @($ruleStatus | Where-Object Obszar -eq $n)
+    $areaCoverage[$n] = [ordered]@{ Ocenione = @($rs | Where-Object { Test-RuleEvaluated $_.Status }).Count; Razem = $rs.Count }
+}
+# Znaleziska o obniżonej pewności (źródło pośrednie lub niepełne)
+$lowConf = @($real | Where-Object { $_.Pewnosc -and $_.Pewnosc -ne 'Wysoka' })
+
 # Macierz ryzyka: obszar x model, punkty znalezisk
 $matrix = @(foreach ($k in $areaNames.Keys) {
     $n = $areaNames[$k]
@@ -5329,6 +5430,7 @@ $meta = [ordered]@{
     Wynik     = $score
     Obszary   = $areaScore
     ObszaryBezLimitu = $areaRaw
+    PokrycieObszarow = $areaCoverage
     KlasaEkspozycji  = "$exposure"
     Dojrzalosc = $maturity
     Wersja    = $Version
@@ -5486,7 +5588,7 @@ $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DN
                                   AktualizacjeDC = @($invPatch | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending) } } |
     ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding $encOut
 
-$sorted | Select-Object Id, Obszar, Model, Poziom, NIS2, ISO27001, MDI, Category, Severity, Title, Count, Recommendation, Mitre |
+$sorted | Select-Object Id, Obszar, Model, Poziom, NIS2, ISO27001, MDI, Category, Severity, Pewnosc, PewnoscUwagi, Title, Count, Recommendation, Mitre |
     Export-Csv "$base.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';'
 
 $objRows = foreach ($f in $sorted) {
@@ -5555,6 +5657,7 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:0;height:5px;ba
 .card.lvl1 .v{color:var(--c)}.card.lvl2 .v{color:var(--h)}.card.lvl3 .v{color:var(--m)}.card.lvl4 .v,.card.lvl5 .v{color:var(--l)}
 .card.area{border-top-color:var(--pb)}
 .card.area .k{font-weight:600;color:var(--ink);font-size:13px}
+.card.area .k.cov{font-weight:400;color:var(--muted);font-size:12px;margin-top:6px}
 .bar{height:8px;background:var(--head);border-radius:4px;margin-top:8px;overflow:hidden}.bar span{display:block;height:100%}
 .bar .r0{background:var(--l)}.bar .r1{background:var(--m)}.bar .r2{background:var(--h)}.bar .r3{background:var(--c)}
 .matrix{display:flex;gap:12px;flex-wrap:wrap}.mcol{flex:1;min-width:220px}
@@ -5675,13 +5778,13 @@ if ($diff) {
 [void]$sb.Append('</div><div class="cards">')
 foreach ($a in $areaScore.Keys) {
     $v = $areaScore[$a]
-    [void]$sb.Append("<div class=`"card area`"><div class=`"k`">$(HtmlEnc $a)</div><div class=`"v`">$v<span class=`"of`">/100</span></div><div class=`"bar`"><span class=`"$(Get-ScoreClass $v)`" style=`"width:$([Math]::Max($v, 2))%`"></span></div></div>")
+    [void]$sb.Append("<div class=`"card area`"><div class=`"k`">$(HtmlEnc $a)</div><div class=`"v`">$v<span class=`"of`">/100</span></div><div class=`"bar`"><span class=`"$(Get-ScoreClass $v)`" style=`"width:$([Math]::Max($v, 2))%`"></span></div><div class=`"k cov`">ocenione reguły: $($areaCoverage[$a].Ocenione) z $($areaCoverage[$a].Razem)</div></div>")
 }
 [void]$sb.Append('</div>')
 
 # Zakres oceny: ile reguł faktycznie oceniono; nieocenione obszary mogą zaniżać wynik
 $covTotal = $ruleStatus.Count
-$covDone  = @($ruleStatus | Where-Object { ($_.Status -in @('Znalezisko', 'Zaliczony')) -or ($_.Status -like 'Nie dotyczy*') -or ($_.Status -like 'Zaliczony warunkowo*') }).Count
+$covDone  = @($ruleStatus | Where-Object { Test-RuleEvaluated $_.Status }).Count
 $covCond  = @($ruleStatus | Where-Object Status -like 'Zaliczony warunkowo*').Count
 $covWinRM = @($ruleStatus | Where-Object Status -eq 'Wymaga -UseWinRM').Count
 $covSkip  = @($ruleStatus | Where-Object Status -like 'Pominięty*').Count
@@ -5695,6 +5798,9 @@ if ($covUnres) { $covParts += "$covUnres nierozstrzygnięto (brak łączności l
 $covText = "<b>Zakres oceny:</b> ocenione reguły $covDone z $covTotal ($([Math]::Round(100 * $covDone / [Math]::Max($covTotal, 1)))%)$(if ($covCond) { ", w tym $covCond zaliczonych warunkowo (zakres GPO do potwierdzenia)" })"
 if ($covParts.Count) { $covText += "; nieocenione: $($covParts -join ', ') - wynik obszarów, których dotyczą, może być zaniżony (szczegóły: <a href=`"#reguly`">Sprawdzone reguły</a>)." } else { $covText += '.' }
 [void]$sb.Append("<p class=`"note`">$covText</p>")
+if ($lowConf.Count) {
+    [void]$sb.Append("<p class=`"note`"><b>Pewność wyników:</b> $($lowConf.Count) z $($real.Count) znalezisk opiera się na źródle pośrednim lub niepełnym (np. GPO zamiast rejestru DC): $(($lowConf | ForEach-Object { "<a href=`"#$(HtmlEnc $_.Id)`">$(HtmlEnc $_.Id)</a> ($(HtmlEnc $_.Pewnosc.ToLower()))" }) -join ', '). Uzasadnienie jest w karcie znaleziska.</p>")
+}
 
 if ($diff) {
     [void]$sb.Append('<section><h2>Porównanie z poprzednim przeglądem</h2>')
@@ -5836,6 +5942,7 @@ foreach ($f in $sorted) {
         $iso = (($f.ISO27001 -split ',\s*') | Where-Object { $_ } | ForEach-Object { "A.$_" }) -join ', '
         [void]$sb.Append("<div class=`"meta`">NIS2 art. 21 ust. 2 / UKSC: lit. $(HtmlEnc $f.NIS2) &nbsp;|&nbsp; ISO/IEC 27001:2022: $(HtmlEnc $iso)</div>")
     }
+    if ($f.Pewnosc -and $f.Pewnosc -ne 'Wysoka') { [void]$sb.Append("<div class=`"meta`">Pewność wyniku: <b>$(HtmlEnc $f.Pewnosc)</b>$(if ($f.PewnoscUwagi) { " - $(HtmlEnc $f.PewnoscUwagi)" })</div>") }
     if ($f.MDI) { [void]$sb.Append("<div class=`"meta`">Microsoft Defender for Identity: $(Get-MdiRef $f.Id -Html)</div>") }
     if ($f.Description)    { [void]$sb.Append("<div class=`"lbl`">Ryzyko</div><div>$(HtmlEnc $f.Description)</div>") }
     if ($f.Recommendation) { [void]$sb.Append("<div class=`"lbl`">Zalecenie</div><div>$(HtmlEnc $f.Recommendation)</div>") }

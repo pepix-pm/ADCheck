@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg', 'ConvertFrom-GpLink', 'Get-GpoApplyOrder', 'Get-GpoApplySids', 'Test-GpoSecurityFilter', 'Get-CheckKey', 'Resolve-CheckList', 'Compare-FindingObject', 'Get-CertBindingState', 'ConvertFrom-NtpResponse', 'Get-NtpSourceIssue', 'Get-GptLocalAdmin', 'Get-GppLocalAdmin'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg', 'ConvertFrom-GpLink', 'Get-GpoApplyOrder', 'Get-GpoApplySids', 'Test-GpoSecurityFilter', 'Get-CheckKey', 'Resolve-CheckList', 'Compare-FindingObject', 'Get-CertBindingState', 'ConvertFrom-NtpResponse', 'Get-NtpSourceIssue', 'Get-GptLocalAdmin', 'Get-GppLocalAdmin', 'Get-AceDanger', 'Get-TemplateEnrollSid', 'Get-TemplateEscFlag', 'Get-GppPasswordEntry', 'Get-NtpSourceSeverity'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -587,6 +587,147 @@ Describe 'Lokalni administratorzy z GPO' {
     }
 }
 
+# Testy regresyjne reguł o najwyższej wadze: przejęcie obiektów przez ACL (P-ACL-TIER0, D-ACL-*), szablony certyfikatów (ESC1-3, 9)
+# i hasła w preferencjach GPO (D-GPP-PASSWORD). Pliki przykładowe w tests\fixtures zawierają wyłącznie dane fikcyjne.
+Describe 'Regresja: niebezpieczne prawa w ACL (Get-AceDanger)' {
+    BeforeAll {
+        $R = [System.DirectoryServices.ActiveDirectoryRights]
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+        $sid = [System.Security.Principal.SecurityIdentifier]'S-1-5-21-1-2-3-1105'
+        function New-Ace($Rights, $Guid) {
+            if ($Guid) { New-Object System.DirectoryServices.ActiveDirectoryAccessRule $sid, $Rights, $allow, ([guid]$Guid) }
+            else { New-Object System.DirectoryServices.ActiveDirectoryAccessRule $sid, $Rights, $allow }
+        }
+    }
+    It 'pełna kontrola, zmiana uprawnień i przejęcie własności' {
+        $r = @(Get-AceDanger (New-Ace $R::GenericAll $null))
+        $r.Count | Should -Be 1
+        $r[0] | Should -Match 'GenericAll'
+        (@(Get-AceDanger (New-Ace $R::WriteDacl $null)) -join ';') | Should -Match 'WriteDacl'
+        (@(Get-AceDanger (New-Ace $R::WriteOwner $null)) -join ';') | Should -Match 'WriteOwner'
+    }
+    It 'zapis atrybutów: member, gPLink, Shadow Credentials, RBCD, SPN, wszystkie atrybuty' {
+        (@(Get-AceDanger (New-Ace $R::WriteProperty $aclGuid.Member)) -join ';') | Should -Match 'member'
+        (@(Get-AceDanger (New-Ace $R::WriteProperty $aclGuid.GpLink)) -join ';') | Should -Match 'gPLink'
+        (@(Get-AceDanger (New-Ace $R::WriteProperty $aclGuid.KeyCredLink)) -join ';') | Should -Match 'Shadow Credentials'
+        (@(Get-AceDanger (New-Ace $R::WriteProperty $aclGuid.Rbcd)) -join ';') | Should -Match 'RBCD'
+        (@(Get-AceDanger (New-Ace $R::WriteProperty $aclGuid.Spn)) -join ';') | Should -Match 'SPN'
+        @(Get-AceDanger (New-Ace $R::WriteProperty $null)).Count | Should -Be 1
+    }
+    It 'prawa rozszerzone: reset hasła, replikacja haseł, wszystkie prawa' {
+        @(Get-AceDanger (New-Ace $R::ExtendedRight $aclGuid.ForceChangePwd)).Count | Should -Be 1
+        (@(Get-AceDanger (New-Ace $R::ExtendedRight $aclGuid.GetChangesAll)) -join ';') | Should -Match 'DCSync'
+        (@(Get-AceDanger (New-Ace $R::ExtendedRight $null)) -join ';') | Should -Match 'DCSync'
+    }
+    It 'prawa nieszkodliwe nie są zgłaszane' {
+        @(Get-AceDanger (New-Ace $R::GenericRead $null)).Count | Should -Be 0
+        @(Get-AceDanger (New-Ace $R::ReadProperty $null)).Count | Should -Be 0
+        # zapis pojedynczego, nieistotnego atrybutu (description) i samo Get-Changes
+        @(Get-AceDanger (New-Ace $R::WriteProperty 'bf967950-0de6-11d0-a285-00aa003049e2')).Count | Should -Be 0
+        @(Get-AceDanger (New-Ace $R::ExtendedRight $aclGuid.GetChanges)).Count | Should -Be 0
+    }
+}
+
+Describe 'Regresja: szablony certyfikatów (ESC1, ESC2, ESC3, ESC9)' {
+    BeforeAll {
+        $clientAuth = '1.3.6.1.5.5.7.3.2'; $serverAuth = '1.3.6.1.5.5.7.3.1'; $agent = '1.3.6.1.4.1.311.20.2.1'; $anyPurpose = '2.5.29.37.0'
+    }
+    It 'ESC1: podmiot z żądania + logowanie, bez zatwierdzania' {
+        $f = Get-TemplateEscFlag 1 0 0 @($clientAuth)
+        $f.Open | Should -BeTrue
+        $f.Esc1 | Should -BeTrue
+        $f.Esc2 | Should -BeFalse
+        $f.Esc3 | Should -BeFalse
+        $f.Esc9 | Should -BeFalse
+    }
+    It 'zatwierdzanie przez menedżera CA lub podpis agenta zamyka szablon' {
+        (Get-TemplateEscFlag 1 2 0 @($clientAuth)).Open | Should -BeFalse
+        (Get-TemplateEscFlag 1 0 1 @($clientAuth)).Open | Should -BeFalse
+    }
+    It 'podmiot z żądania bez EKU do logowania nie jest ESC1' {
+        $f = Get-TemplateEscFlag 1 0 0 @($serverAuth)
+        $f.Esc1 | Should -BeFalse
+        $f.Auth | Should -BeFalse
+    }
+    It 'ESC2: brak EKU lub Any Purpose (nadaje się też do logowania)' {
+        $f = Get-TemplateEscFlag 0 0 0 @()
+        $f.Esc2 | Should -BeTrue
+        $f.Auth | Should -BeTrue
+        $f.Esc1 | Should -BeFalse
+        (Get-TemplateEscFlag 0 0 0 @($anyPurpose)).Esc2 | Should -BeTrue
+        (Get-TemplateEscFlag 1 0 0 @($anyPurpose)).Esc1 | Should -BeTrue
+    }
+    It 'ESC3: certyfikat agenta rejestracji' {
+        $f = Get-TemplateEscFlag 0 0 0 @($agent)
+        $f.Esc3 | Should -BeTrue
+        $f.Esc2 | Should -BeFalse
+    }
+    It 'ESC9: bez rozszerzenia SID + logowanie' {
+        (Get-TemplateEscFlag 0 0x80000 0 @($clientAuth)).Esc9 | Should -BeTrue
+        (Get-TemplateEscFlag 0 0x80000 0 @($serverAuth)).Esc9 | Should -BeFalse
+        (Get-TemplateEscFlag 0 0 0 @($clientAuth)).Esc9 | Should -BeFalse
+    }
+    It 'Get-TemplateEnrollSid: Enroll, AutoEnroll, wszystkie prawa rozszerzone i pełna kontrola; bez odmów i innych praw' {
+        $R = [System.DirectoryServices.ActiveDirectoryRights]
+        $T = [System.Security.AccessControl.AccessControlType]
+        $mk = { param($Rid, $Rights, $Type, $Guid)
+            $s = [System.Security.Principal.SecurityIdentifier]"S-1-5-21-1-2-3-$Rid"
+            if ($Guid) { New-Object System.DirectoryServices.ActiveDirectoryAccessRule $s, $Rights, $Type, ([guid]$Guid) }
+            else { New-Object System.DirectoryServices.ActiveDirectoryAccessRule $s, $Rights, $Type } }
+        $sd = New-Object System.DirectoryServices.ActiveDirectorySecurity
+        $sd.AddAccessRule((& $mk 513  $R::ExtendedRight $T::Allow '0e10c968-78fb-11d2-90d4-00c04f79dc55'))   # Enroll
+        $sd.AddAccessRule((& $mk 1106 $R::ExtendedRight $T::Allow 'a05b8cc2-17bc-4802-a710-e7c15ab866a2'))   # AutoEnroll
+        $sd.AddAccessRule((& $mk 1107 $R::GenericAll    $T::Allow $null))
+        $sd.AddAccessRule((& $mk 1111 $R::ExtendedRight $T::Allow $null))                                    # wszystkie prawa rozszerzone
+        $sd.AddAccessRule((& $mk 1108 $R::ExtendedRight $T::Deny  '0e10c968-78fb-11d2-90d4-00c04f79dc55'))   # odmowa
+        $sd.AddAccessRule((& $mk 1109 $R::GenericRead   $T::Allow $null))
+        $sd.AddAccessRule((& $mk 1110 $R::ExtendedRight $T::Allow $aclGuid.ForceChangePwd))                  # inne prawo rozszerzone
+        $got = @(Get-TemplateEnrollSid $sd | Sort-Object)
+        $exp = @('S-1-5-21-1-2-3-513', 'S-1-5-21-1-2-3-1106', 'S-1-5-21-1-2-3-1107', 'S-1-5-21-1-2-3-1111' | Sort-Object)
+        ($got -join '|') | Should -Be ($exp -join '|')
+        @(Get-TemplateEnrollSid $null).Count | Should -Be 0
+    }
+}
+
+Describe 'Regresja: hasła w preferencjach GPO (D-GPP-PASSWORD)' {
+    BeforeAll {
+        function Read-Fixture([string]$Name) { [xml](Get-Content -LiteralPath (Join-Path $PSScriptRoot "fixtures\$Name") -Raw -Encoding UTF8) }
+    }
+    It 'Groups.xml: cpassword konta lokalnego; pusty cpassword pominięty' {
+        $r = @(Get-GppPasswordEntry (Read-Fixture 'gpp-groups.xml') 'Groups.xml')
+        $r.Count | Should -Be 1
+        $r[0].Element | Should -Be 'lokalny-admin'
+        $r[0].Konto | Should -Be 'lokalny-admin'
+        $r[0].Typ | Should -Match '^cpassword'
+    }
+    It 'ScheduledTasks.xml: konto z atrybutu runAs' {
+        $r = @(Get-GppPasswordEntry (Read-Fixture 'gpp-scheduledtasks.xml') 'ScheduledTasks.xml')
+        $r.Count | Should -Be 1
+        $r[0].Element | Should -Be 'Kopia'
+        $r[0].Konto | Should -Be 'FIRMA\svc-kopia'
+    }
+    It 'Registry.xml: hasło autologowania, bez wartości hasła w wyniku' {
+        $r = @(Get-GppPasswordEntry (Read-Fixture 'gpp-registry.xml') 'Registry.xml')
+        $r.Count | Should -Be 1
+        $r[0].Element | Should -Be 'DefaultPassword'
+        $r[0].Typ | Should -Match 'DefaultPassword'
+        (($r | ForEach-Object { $_.PSObject.Properties.Value }) -join ' ') | Should -Not -Match 'PrzykladoweHaslo'
+    }
+    It 'plik preferencji rejestru nie jest czytany jak plik z cpassword i odwrotnie' {
+        @(Get-GppPasswordEntry (Read-Fixture 'gpp-registry.xml') 'Groups.xml').Count | Should -Be 0
+        @(Get-GppPasswordEntry (Read-Fixture 'gpp-groups.xml') 'Registry.xml').Count | Should -Be 0
+        @(Get-GppPasswordEntry $null 'Groups.xml').Count | Should -Be 0
+    }
+}
+
+Describe 'Waga DC-TIME-SOURCE' {
+    It 'zależy od problemu' {
+        Get-NtpSourceSeverity 'zegar niezsynchronizowany (usługa czasu nie ma działającego źródła)' | Should -Be 'High'
+        Get-NtpSourceSeverity 'zegar lokalny serwera (Local CMOS Clock) - brak zewnętrznego źródła czasu' | Should -Be 'Medium'
+        Get-NtpSourceSeverity 'czas z hosta wirtualizacji (VM IC Time Synchronization Provider)' | Should -Be 'Low'
+    }
+}
+
 # Warstwa raportu bez AD: funkcje i tabele ze skryptu, znaleziska z pliku przykładowego, a potem kod regionów
 # "wynik: dane" i "wynik: pliki" wykonany tak jak w skrypcie.
 Describe 'Raport z danych przykładowych (HTML, JSON, CSV)' {
@@ -636,6 +777,11 @@ Describe 'Raport z danych przykładowych (HTML, JSON, CSV)' {
         $html = if ($res) { Get-Content -LiteralPath $res.Raport -Raw -Encoding UTF8 } else { '' }
         $json = if ($res) { Get-Content -LiteralPath $res.Json -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
     }
+    It 'każda reguła katalogu należy do testu z etykietą (-ListChecks, -IncludeCheck)' {
+        $bad = @($ruleCatalog | Where-Object { $checkKnown -notcontains (Get-CheckKey $_.C $checkKnown) } | ForEach-Object { "$($_.Id) -> $($_.C)" })
+        $bad | Should -BeNullOrEmpty
+        @($ruleCatalog | Group-Object { $_.Id } | Where-Object Count -gt 1).Count | Should -Be 0
+    }
     It 'tworzy pliki raportu i zwraca wynik (-Silent)' {
         $res | Should -Not -BeNullOrEmpty
         Test-Path -LiteralPath $res.Raport | Should -BeTrue
@@ -655,12 +801,23 @@ Describe 'Raport z danych przykładowych (HTML, JSON, CSV)' {
         $html.Contains('<th>_Id</th>') | Should -BeFalse
         $html.Contains('S-1-5-21-1111111111') | Should -BeFalse
         $html.Contains('j.kowalski') | Should -BeTrue
+        $html.Contains('ocenione reguły:') | Should -BeTrue
+    }
+    It 'pewność wyniku: wartość domyślna i przekazana w znalezisku' {
+        $before = $findings.Count
+        Add-Finding @{ Id = 'DC-LDAPSIGN'; Category = 'Kontrolery domeny'; Severity = 'Medium'; Title = 'test'; Confidence = 'Niska'; ConfidenceNote = 'uwaga testowa' }
+        $findings[$before].Pewnosc | Should -Be 'Niska'
+        $findings[$before].PewnoscUwagi | Should -Be 'uwaga testowa'
+        Add-Finding @{ Id = 'DC-LDAPCBT'; Category = 'Kontrolery domeny'; Severity = 'Medium'; Title = 'test' }
+        $findings[$before + 1].Pewnosc | Should -Be 'Wysoka'
     }
     It 'JSON: wersja schematu, wynik, identyfikatory obiektów, statusy reguł' {
         $json.SchemaVersion | Should -Be $jsonSchemaVersion
         $json.Meta.Klient | Should -Be 'KLIENT'
         $json.Meta.Wynik | Should -Be 25
         $json.Meta.Czesciowy | Should -BeFalse
+        $json.Meta.PokrycieObszarow.Anomalie.Razem | Should -BeGreaterThan 0
+        @($json.Znaleziska | Where-Object Id -eq 'U-SIDHIST')[0].Pewnosc | Should -Be 'Wysoka'
         @($json.Znaleziska).Count | Should -Be 4
         @($json.Znaleziska | Where-Object Id -eq 'U-SIDHIST')[0].Objects[0]._Id | Should -Be 'S-1-5-21-1111111111-2222222222-3333333333-1105'
         @($json.Reguly | Where-Object Id -eq 'D-GPP-PASSWORD')[0].Status | Should -Be 'Znalezisko'

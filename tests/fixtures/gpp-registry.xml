@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dane fikcyjne do testów D-GPP-PASSWORD (hasło autologowania). -->
+<RegistrySettings clsid="{A3CCFC41-DFDB-43a5-8D26-0FE8B954DA51}">
+  <Registry clsid="{9CD4B2F4-923D-47f5-A062-E897DD1DAD50}" name="DefaultUserName" status="DefaultUserName" image="7" changed="2020-01-15 10:00:00" uid="{55555555-5555-5555-5555-555555555555}">
+    <Properties action="U" displayDecimal="0" default="0" hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" name="DefaultUserName" type="REG_SZ" value="kiosk"/>
+  </Registry>
+  <Registry clsid="{9CD4B2F4-923D-47f5-A062-E897DD1DAD50}" name="DefaultPassword" status="DefaultPassword" image="7" changed="2020-01-15 10:00:00" uid="{66666666-6666-6666-6666-666666666666}">
+    <Properties action="U" displayDecimal="0" default="0" hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" name="DefaultPassword" type="REG_SZ" value="PrzykladoweHaslo"/>
+  </Registry>
+</RegistrySettings>

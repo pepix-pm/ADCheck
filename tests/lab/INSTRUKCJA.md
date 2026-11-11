@@ -228,8 +228,9 @@ Przygotowanie: GPO `Lab-H-Domena` podlinkowane do domeny z LmCompatibilityLevel 
 | I2 | to samo GPO podlinkowane dodatkowo do domeny | waga High, ObejmujeDC „Tak” |
 | I3 | w preferencjach GPO (Local Users and Groups) dodane Domain Users do Administrators (built-in) | waga Critical, wiersz ze źródłem „Preferencje (Groups.xml)”, SzerokaGrupa „Tak” |
 | I4 | wpis z kontem lokalnym (np. `Administrator`) i z grupą Domain Admins | **brak** wierszy dla tych wpisów |
-| I5 | PDC jako maszyna wirtualna Hyper-V z włączoną synchronizacją czasu z hostem (domyślnie) | DC-TIME-SOURCE (Medium) „czas z hosta wirtualizacji”; na PDC `w32tm /query /source` pokazuje „VM IC Time Synchronization Provider” |
-| I6 | na PDC: `VMICTimeProvider\Enabled = 0`, zewnętrzny NTP, `w32tm /resync` | DC-TIME-SOURCE: „Zaliczony”; gdy PDC nie ma dostępu do NTP – znalezisko „zegar lokalny” albo „niezsynchronizowany” (zapisz, które) |
+| I5 | PDC jako maszyna wirtualna Hyper-V z włączoną synchronizacją czasu z hostem (domyślnie) | DC-TIME-SOURCE (Low) „czas z hosta wirtualizacji”, w karcie „Pewność wyniku: Średnia” (z `-UseWinRM` bez tego dopisku); na PDC `w32tm /query /source` pokazuje „VM IC Time Synchronization Provider” |
+| I6 | na PDC: `VMICTimeProvider\Enabled = 0`, zewnętrzny NTP, `w32tm /resync` | DC-TIME-SOURCE: „Zaliczony”; gdy PDC nie ma dostępu do NTP – znalezisko „zegar lokalny” (Medium) albo „niezsynchronizowany” (High) – zapisz, które |
+| I6a | przebieg bez `-UseWinRM` z niezgodnościami CIS | karty DC-CIS-REG, DC-CIS-AUDIT, DC-LDAPSIGN: „Pewność wyniku: Średnia”; po przypisaniu filtru WMI do GPO z OU Domain Controllers – „Niska”; z `-UseWinRM` dopisek znika (poza DC-CIS-RIGHTS). Karty obszarów mają „ocenione reguły: X z Y” |
 | I7 | `-UseWinRM`; na jednym DC `StrongCertificateBindingEnforcement = 1` | D-ADCS-ESC10 (Medium) z tym DC; opis D-ADCS-ESC9 wymienia ten DC |
 | I8 | I7 + `CertificateMappingMethods = 0x1F` na tym DC | D-ADCS-ESC10 (High), Uwagi „Schannel mapuje certyfikat na konto po UPN” |
 | I9 | wartości z I7–I8 usunięte | D-ADCS-ESC10 „Zaliczony”; D-ADCS-ESC9 (jeśli występuje) ma wagę Low; bez `-UseWinRM`: D-ADCS-ESC10 „Wymaga -UseWinRM” |

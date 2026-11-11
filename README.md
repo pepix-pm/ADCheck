@@ -39,7 +39,8 @@ clear
 | `-UseWinRM` | Testy DC na podstawie rzeczywistej konfiguracji (rejestr, `auditpol`, dziennik Security) odczytanej przez WinRM; wymaga członkostwa w grupie Administrators domeny |
 | `-SkipDCChecks` | Pomija testy kontrolerów domeny |
 | `-MaxHistoryPoints` | Największa liczba przeglądów w sekcji „Historia przeglądów” – najnowsze, razem z bieżącym (domyślnie 24; od v0.31) |
-| `-IncludeCheck`, `-ExcludeCheck` | Tylko wskazane testy albo wszystkie poza wskazanymi – np. szybki ponowny test po naprawie. Nazwa testu (`ADCS`, `PRIV`, `DC-PROBE`, …; pełną listę podaje komunikat błędu przy nieznanej nazwie) lub Id reguły (`D-ADCS-ESC1` uruchamia cały test `ADCS`). Przegląd częściowy jest oznaczony w raporcie, nie trafia do historii, a jego wyniku nie należy porównywać z pełnym (od v0.31) |
+| `-IncludeCheck`, `-ExcludeCheck` | Tylko wskazane testy albo wszystkie poza wskazanymi – np. szybki ponowny test po naprawie. Nazwa testu (`ADCS`, `PRIV`, `DC-PROBE`, …; pełna lista: `-ListChecks`) lub Id reguły (`D-ADCS-ESC1` uruchamia cały test `ADCS`). Przegląd częściowy jest oznaczony w raporcie, nie trafia do historii, a jego wyniku nie należy porównywać z pełnym (od v0.31) |
+| `-ListChecks` | Wypisuje testy i reguły (kolumny Test, Regula, Wymaga, Opis) i kończy – bez połączenia z domeną i bez `-Client`; kolumna Test to nazwa do `-IncludeCheck` / `-ExcludeCheck` (od v0.31) |
 | `-MaxRows` | Maksymalna liczba obiektów na znalezisko w HTML (domyślnie 500; pełna lista w CSV) |
 | `-Silent` | Bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików (do automatyzacji) |
 
@@ -107,6 +108,7 @@ W katalogu `raporty` powstają pliki `AD_<klient>_<domena>_<data>`:
 - Każde znalezisko: Critical = 25, High = 10, Medium = 3, Low = 1 pkt.
 - Znaleziska należą do jednego z **czterech obszarów ryzyka**: obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie. Wynik obszaru = suma punktów, maks. 100. **Wynik ogólny = najgorszy obszar** (0–100, im mniej, tym lepiej). Gdy suma przekracza 100, raport podaje też pełną sumę (np. 4 i 10 znalezisk Critical dają ten sam wynik 100, ale inną sumę); porównanie z `-Previous` pokazuje wtedy zmianę sumy. Karta zmiany podaje też zmianę klasy ekspozycji i liczbę nowych znalezisk Critical (wynik może spaść mimo nowego Critical, jeśli najgorszy jest inny obszar), a sekcja porównania ostrzega, gdy poprzedni przegląd wykonano w innym trybie (testy DC, konto przeglądu, uprawnienia konta).
 - **Klasa ekspozycji A–E** wynika z najpoważniejszego znaleziska (Critical = E, High = D, Medium = C, Low = B, brak = A). Opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa organizacji.
+- **Pewność wyniku** (Wysoka / Średnia / Niska) – znalezisko oparte na źródle pośrednim ma w karcie dopisek z uzasadnieniem: np. ustawienia DC odczytane z GPO zamiast z rejestru (Średnia) albo z GPO o niepewnym zakresie lub niepełnym odczycie (Niska). Pole `Pewnosc` jest też w JSON i CSV. Karta każdego obszaru podaje, ile jego reguł faktycznie oceniono (`Meta.PokrycieObszarow`) – przy niepełnym pokryciu wynik obszaru może być zaniżony.
 - **Macierz ryzyka** pokazuje punkty w podziale obszar × rodzaj ryzyka (np. „Łamanie haseł”, „Pass-the-hash”, „Replikacja i kondycja”).
 - **Historia przeglądów** (`-History`) – wykres wyniku ogólnego i obszarów oraz zgodności DC z CIS L1 i Microsoft Security Baseline w kolejnych przeglądach, z tabelą (data, wersja, tryb, wynik, klasa, liczba znalezisk wg wagi). Źródłem są pliki JSON z katalogu wyników, wyłącznie z tą samą nazwą klienta i domeną; pliki z niezgodną główną wersją `SchemaVersion` są pomijane. Przeglądy w innym trybie niż bieżący (inne źródło testów DC lub inne konto) mają pusty znacznik – zmiana może wynikać z trybu, a nie ze zmian w AD. Wykres jest wpisany w raport (SVG), bez zewnętrznych bibliotek.
 - Nazwy kont i grup w tabelach mogą być w różnych językach. Grupy wbudowane i domenowe (np. „BUILTIN\Administratorzy”, „FIRMA\Administratorzy domeny”) mają nazwy zapisane w AD przy tworzeniu domeny – zostają w tym języku także po wymianie DC na system w innym języku. Identyfikatory dobrze znane (np. „Everyone”, „NT AUTHORITY\Authenticated Users”) tłumaczy system stacji, z której uruchomiono przegląd. Ocena opiera się na SID, więc wynik nie zależy od języka.
@@ -253,7 +255,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-SYSVOL-FRS | High | SYSVOL replikowany przez FRS | – |
 | DC-SYSVOL-SHARE | High | DC bez udziału SYSVOL/NETLOGON | – |
 | DC-TIME | High / Medium | Czas DC różni się od PDC o > 5 min / > 1 min | – |
-| DC-TIME-SOURCE | Medium | PDC Emulator bierze czas z hosta wirtualizacji (dostawca czasu Hyper-V), z zegara lokalnego albo zgłasza brak synchronizacji – z odpowiedzi NTP (UDP 123), z `-UseWinRM` także z `w32tm /query /source` | – |
+| DC-TIME-SOURCE | High / Medium / Low | Źródło czasu PDC Emulatora z odpowiedzi NTP (UDP 123), z `-UseWinRM` także z `w32tm /query /source`: brak synchronizacji (High), zegar lokalny bez zewnętrznego źródła (Medium), czas z hosta wirtualizacji – dostawca czasu Hyper-V (Low) | – |
 | D-SINGLEDC | Medium | Tylko jeden kontroler domeny | – |
 | DC-MACHINEPWD | Medium | Hasło konta komputera DC starsze niż 45 dni | – |
 | DC-PORTS | Medium | Niedostępne porty usług AD na DC (53, 88, 135, 389, 445, 9389, 3268) | – |
@@ -298,7 +300,7 @@ Wersja i data końca wsparcia ustalane są z atrybutów `operatingSystem` i `ope
 Invoke-Pester .\tests
 ```
 
-Testy (Pester 5) ładują z pliku skryptu definicje funkcji niezależnych od AD, bez uruchamiania skryptu. Warstwa raportu (HTML, JSON, CSV) jest sprawdzana na fikcyjnych danych z `tests/fixtures/znaleziska.json`. Przy każdym pushu i pull requeście GitHub Actions (`.github/workflows/ci.yml`, Windows) uruchamia PSScriptAnalyzer (Warning, Error; wyłączone reguły z uzasadnieniem w `PSScriptAnalyzerSettings.psd1`), testy Pester oraz sprawdza kodowanie UTF-8 z BOM plików `*.ps1`.
+Testy (Pester 5) ładują z pliku skryptu definicje funkcji niezależnych od AD, bez uruchamiania skryptu. Warstwa raportu (HTML, JSON, CSV) jest sprawdzana na fikcyjnych danych z `tests/fixtures/znaleziska.json`. Reguły o najwyższej wadze mają testy regresyjne: niebezpieczne prawa w ACL, DCSync, szablony certyfikatów (ESC1–3, 9) i hasła w preferencjach GPO (pliki przykładowe `tests/fixtures/gpp-*.xml`). Przy każdym pushu i pull requeście GitHub Actions (`.github/workflows/ci.yml`, Windows) uruchamia PSScriptAnalyzer (Warning, Error; wyłączone reguły z uzasadnieniem w `PSScriptAnalyzerSettings.psd1`), testy Pester oraz sprawdza kodowanie UTF-8 z BOM plików `*.ps1`.
 
 ## Ograniczenia
 
