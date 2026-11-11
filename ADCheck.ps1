@@ -13,6 +13,8 @@
     -Silent: bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików.
     -History: sekcja "Historia przeglądów" z wykresem wyników i zgodności DC z raportów JSON tego klienta i domeny w katalogu -OutDir.
     -MaxHistoryPoints: największa liczba przeglądów w historii (domyślnie 24 najnowsze, razem z bieżącym).
+    -IncludeCheck / -ExcludeCheck: tylko wskazane testy albo wszystkie poza wskazanymi - nazwy testów (np. ADCS, DC-PROBE) lub Id reguł
+      (np. D-ADCS-ESC1 = cały test ADCS). Przegląd częściowy: wynik nie jest porównywalny z pełnym i nie trafia do historii.
     -Client: alias -Klient.
     Wynik: szczegółowy raport HTML, JSON (do porównań), CSV znalezisk i CSV obiektów.
     Punkty: Critical=25, High=10, Medium=3, Low=1 za znalezisko; wynik 0-100 w czterech obszarach ryzyka,
@@ -44,12 +46,14 @@ param(
     [int]$MaxRows = 500,
     [switch]$Silent,
     [switch]$History,
-    [ValidateRange(2, 500)][int]$MaxHistoryPoints = 24
+    [ValidateRange(2, 500)][int]$MaxHistoryPoints = 24,
+    [string[]]$IncludeCheck,
+    [string[]]$ExcludeCheck
 )
 
 $ErrorActionPreference = 'Stop'
 $Version = '0.31'
-$jsonSchemaVersion = '1.2'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
+$jsonSchemaVersion = '1.3'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
@@ -409,6 +413,7 @@ function ConvertTo-UserRow($u) {
         HasloUstawione    = Format-Date $u.PasswordLastSet
         Utworzone         = Format-Date $u.whenCreated
         Kontener          = Get-ParentOU $u.DistinguishedName
+        _Id               = "$($u.SID)"   # klucz porównania z -Previous (kolumny z "_" nie trafiają do HTML ani CSV)
     }
 }
 
@@ -420,6 +425,7 @@ function ConvertTo-ComputerRow($c) {
         OstatnieLogowanie = Format-Date $c.LastLogonDate
         Utworzone         = Format-Date $c.whenCreated
         Kontener          = Get-ParentOU $c.DistinguishedName
+        _Id               = "$($c.SID)"
     }
 }
 
@@ -556,6 +562,7 @@ $ruleCatalog = @(
     @{ Id = 'DC-PORTS';          O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Niedostępne usługi AD na DC' }
     @{ Id = 'DC-SYSVOL-SHARE';   O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Brak udziału SYSVOL/NETLOGON' }
     @{ Id = 'DC-TIME';           O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Różnica czasu DC względem PDC' }
+    @{ Id = 'DC-TIME-SOURCE';    O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Źródło czasu PDC Emulatora' }
     @{ Id = 'D-GPO-SYNC';        O = 'S'; M = 'Replikacja i kondycja';        C = 'GPO-SYNC';     W = 'DC'; T = 'GPO niespójne AD-SYSVOL' }
     @{ Id = 'DC-DNS-SRV';        O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-DNS';       W = 'DC'; T = 'Brak rekordów SRV DC' }
 
@@ -566,6 +573,7 @@ $ruleCatalog = @(
     @{ Id = 'P-KeyAdmins';       O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Key Admins' }
     @{ Id = 'P-EnterpriseKeyAdmins'; O = 'P'; M = 'Grupy uprzywilejowane';    C = 'PRIV';         T = 'Niepusta grupa Enterprise Key Admins' }
     @{ Id = 'P-GPCO';            O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Nie-admini w Group Policy Creator Owners' }
+    @{ Id = 'D-GPO-LOCALADMIN';  O = 'P'; M = 'Grupy uprzywilejowane';        C = 'GPO-ADMINS';   W = 'DC'; T = 'Lokalni administratorzy nadawani przez GPO' }
     @{ Id = 'D-GPP-PASSWORD';    O = 'A'; M = 'Ujawnione hasła';              C = 'GPP';          W = 'DC'; T = 'Hasła w preferencjach GPO (SYSVOL)' }
     @{ Id = 'P-ServerOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Server Operators' }
     @{ Id = 'P-PrintOperators';  O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Print Operators' }
@@ -634,6 +642,7 @@ $ruleCatalog = @(
     @{ Id = 'D-ADCS-ESC2';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon: dowolne zastosowanie lub brak EKU (ESC2)' }
     @{ Id = 'D-ADCS-ESC3';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon agenta rejestracji (ESC3)' }
     @{ Id = 'D-ADCS-ESC9';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Szablon bez rozszerzenia SID (ESC9)' }
+    @{ Id = 'D-ADCS-ESC10';      O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         W = 'WinRM'; T = 'Słabe wiązanie certyfikatów z kontami na DC (ESC10)' }
     @{ Id = 'D-ADCS-ORPHAN';     O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'CA wycofane, ale nadal zarejestrowane w AD' }
     @{ Id = 'D-ADCS-ESC13';      O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'Zasady wystawiania powiązane z grupą (ESC13)' }
     @{ Id = 'D-ADCS-ESC6';       O = 'A'; M = 'Usługi certyfikatów (AD CS)';  C = 'ADCS';         T = 'CA przyjmuje nazwę alternatywną z żądania (ESC6)' }
@@ -756,6 +765,7 @@ $planMeta = @{
     'DC-PORTS'         = @(1, 4, 1, '')
     'DC-SYSVOL-SHARE'  = @(2, 6, 1, '')
     'DC-TIME'          = @(1, 3, 1, '')
+    'DC-TIME-SOURCE'   = @(1, 2, 1, 'Zmiana tylko na PDC Emulatorze')
     'D-GPO-SYNC'       = @(2, 4, 1, '')
     'DC-DNS-SRV'       = @(1, 2, 1, '')
     'P-DA-COUNT'       = @(2, 6, 1, 'Wymaga decyzji, kto pozostaje administratorem')
@@ -766,6 +776,7 @@ $planMeta = @{
     'P-EnterpriseKeyAdmins' = @(1, 1, 1, 'Sprawdzić, czy członkostwa nie wymaga wdrożenie Windows Hello for Business')
     'P-GPCO'           = @(0.5, 1, 1, '')
     'D-GPP-PASSWORD'   = @(2, 8, 1, 'Najpierw zmiana ujawnionych haseł, potem usunięcie wpisów z GPO')
+    'D-GPO-LOCALADMIN' = @(2, 8, 2, 'Najpierw ustalić, kto potrzebuje uprawnień i na których komputerach')
     'P-ServerOperators' = @(1, 2, 1, '')
     'P-PrintOperators' = @(1, 2, 1, '')
     'P-BackupOperators' = @(1, 2, 1, 'Sprawdzić, czy grupy nie używa oprogramowanie do kopii')
@@ -831,6 +842,7 @@ $planMeta = @{
     'D-ADCS-ESC2'      = @(2, 4, 1, '')
     'D-ADCS-ESC3'      = @(2, 4, 1, 'Na CA ograniczyć agentów rejestracji (Enrollment Agents)')
     'D-ADCS-ESC9'      = @(1, 3, 2, 'Najpierw sprawdzić tryb StrongCertificateBindingEnforcement na DC')
+    'D-ADCS-ESC10'     = @(1, 4, 2, 'Najpierw zdarzenia KDC 39/41 - certyfikaty bez silnego mapowania')
     'D-ADCS-ESC13'     = @(1, 4, 1, '')
     'D-ADCS-ORPHAN'    = @(1, 3, 1, 'Potwierdzić, że certyfikaty z tego CA nie są już używane (VPN, Wi-Fi, RDP, karty)')
     'D-ADCS-ESC6'      = @(1, 2, 1, 'Restart usługi CertSvc po zmianie')
@@ -940,7 +952,7 @@ $checkLabels = @{
     'PRIV' = 'Konta uprzywilejowane'; 'USERS' = 'Konta użytkowników'; 'COMPUTERS' = 'Komputery, systemy i LAPS'
     'COMP-OWNER' = 'Właściciele kont komputerów'; 'OWNERS' = 'Właściciele OU, GPO, grup i kont'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'; 'ACL-TIER0' = 'Uprawnienia Tier 0, delegacja do DC'
     'LAPS-ACL' = 'Dostęp do haseł LAPS'; 'KRB-ENC' = 'Kerberos: szyfrowanie DES/RC4'; 'DOMAIN' = 'Domena, las, hasła, DNS'
-    'DC-OS' = 'Systemy kontrolerów domeny'; 'DC-GPO' = 'GPO kontrolerów domeny'; 'GPO-ALL' = 'GPO w całej domenie'; 'GPP' = 'Hasła w preferencjach GPO (SYSVOL)'
+    'DC-OS' = 'Systemy kontrolerów domeny'; 'DC-GPO' = 'GPO kontrolerów domeny'; 'GPO-ALL' = 'GPO w całej domenie'; 'GPP' = 'Hasła w preferencjach GPO (SYSVOL)'; 'GPO-ADMINS' = 'Lokalni administratorzy z GPO'
     'CIS' = 'Konfiguracja DC (CIS i Microsoft)'; 'DC-PATCH' = 'Aktualizacje kontrolerów domeny'; 'REPL' = 'Replikacja AD'
     'BACKUP' = 'Kopia zapasowa AD'; 'SYSVOL-FRS' = 'Replikacja SYSVOL'; 'FSMO' = 'Role FSMO'; 'DC-REG' = 'Rejestracja kontrolerów domeny'
     'SITES' = 'Lokacje i podsieci'; 'DC-MACHINEPWD' = 'Hasła kont komputerów DC'; 'DC-NET' = 'Porty i udziały DC'
@@ -948,6 +960,37 @@ $checkLabels = @{
     'FGPP' = 'Szczegółowe zasady haseł (PSO)'; 'DUPLICATES' = 'Zduplikowane SPN i UPN'; 'GPO-LINKS' = 'GPO bez łączy'; 'TRUSTS' = 'Relacje zaufania'
     'ADCS' = 'Usługi certyfikatów (AD CS)'
 }
+# -IncludeCheck / -ExcludeCheck. Klucz testu: nazwa Invoke-Check; sondy pojedynczych DC i DC-GPO wybiera się razem jako DC-PROBE,
+# strefy DNS (DNS-ZONES w katalogu reguł) są częścią testu DOMAIN.
+function Get-CheckKey([string]$Name, [string[]]$Known) {
+    $n = "$Name".Trim().ToUpper()
+    if ($n -eq 'DNS-ZONES') { 'DOMAIN' } elseif ($n -eq 'DC-GPO') { 'DC-PROBE' } elseif ($Known -contains $n) { $n } elseif ($n -like 'DC-*') { 'DC-PROBE' } else { $n }
+}
+# Nazwy testów lub Id reguł (także rozdzielone przecinkami) -> klucze testów; nieznane trafiają do $Unknown
+function Resolve-CheckList([string[]]$Names, [object[]]$Catalog, [string[]]$Known, [System.Collections.Generic.List[string]]$Unknown) {
+    foreach ($raw in $Names) {
+        foreach ($x in ("$raw" -split ',')) {
+            $x = $x.Trim()
+            if (-not $x) { continue }
+            $rule = @($Catalog | Where-Object { $_.Id -eq $x })[0]
+            $k = Get-CheckKey $(if ($rule) { $rule.C } else { $x }) $Known
+            if ($Known -contains $k) { $k } elseif ($null -ne $Unknown) { $Unknown.Add($x) }
+        }
+    }
+}
+$checkKnown   = [string[]]@(@($checkLabels.Keys | Where-Object { $_ -ne 'DC-GPO' }) + 'DC-PROBE' | Sort-Object)
+$checkUnknown = [System.Collections.Generic.List[string]]::new()
+$checkInclude = [string[]]@(Resolve-CheckList $IncludeCheck $ruleCatalog $checkKnown $checkUnknown | Select-Object -Unique)
+$checkExclude = [string[]]@(Resolve-CheckList $ExcludeCheck $ruleCatalog $checkKnown $checkUnknown | Select-Object -Unique)
+if ($checkUnknown.Count) {
+    throw "Nieznany test lub reguła w -IncludeCheck / -ExcludeCheck: $($checkUnknown -join ', '). Dostępne testy: $($checkKnown -join ', '); można też podać Id reguły (np. D-ADCS-ESC1)."
+}
+$partialRun = [bool]($checkInclude.Count -or $checkExclude.Count)
+function Test-CheckSelected([string]$Name) {
+    $k = Get-CheckKey $Name $checkKnown
+    (-not $checkInclude.Count -or $checkInclude -contains $k) -and ($checkExclude -notcontains $k)
+}
+
 function Format-Count([int]$N) {
     $w = if ($N -eq 1) { 'znalezisko' } elseif ($N % 10 -in 2, 3, 4 -and $N % 100 -notin 12, 13, 14) { 'znaleziska' } else { 'znalezisk' }
     "$N $w"
@@ -956,6 +999,11 @@ function Format-Count([int]$N) {
 # Test w izolacji: błąd trafia do raportu jako Info, nie przerywa przeglądu; w konsoli wynik i czas
 function Invoke-Check([string]$Name, [scriptblock]$Block) {
     $label  = if ($checkLabels.ContainsKey($Name)) { $checkLabels[$Name] } elseif ($Name -like 'DC-*') { "Sondy DC: $($Name.Substring(3))" } else { $Name }
+    if (-not (Test-CheckSelected $Name)) {
+        Write-Step ('  {0,-44}' -f $label) -NoNewline
+        Write-Step 'pominięty (-IncludeCheck / -ExcludeCheck)' 'DarkGray'
+        return
+    }
     $before = $findings.Count
     $timer  = [System.Diagnostics.Stopwatch]::StartNew()
     Write-Step ('  {0,-44}' -f $label) -NoNewline
@@ -1013,6 +1061,42 @@ function Get-NcName([string]$Nc) {
         '^DC=ForestDnsZones,' { 'ForestDnsZones'; break }
         default               { "Domena ($Nc)" }
     }
+}
+
+# Odpowiedź NTP (48 bajtów): wskaźnik przestępny (3 = zegar niezsynchronizowany), warstwa (stratum) i identyfikator źródła.
+# RefId: dla stratum 0-1 kod ASCII (np. LOCL); Windows podaje kod także dla dostawcy czasu Hyper-V (VMTP); w pozostałych przypadkach adres IPv4 źródła.
+function ConvertFrom-NtpResponse([byte[]]$Bytes) {
+    if (-not $Bytes -or $Bytes.Length -lt 48) { return $null }
+    $ref = [byte[]]$Bytes[12..15]
+    $txt = (-join ($ref | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }))
+    $ascii = ($txt.Length -ge 3) -and ($txt -cmatch '^[A-Z][A-Z0-9]{2,3}$')
+    $stratum = [int]$Bytes[1]
+    [pscustomobject]@{
+        Leap = [int]($Bytes[0] -shr 6); Stratum = $stratum
+        RefId = $(if ($ascii -and ($stratum -le 1 -or $txt -in 'VMTP', 'LOCL')) { $txt } else { ($ref | ForEach-Object { [int]$_ }) -join '.' })
+    }
+}
+# Ocena źródła czasu z odpowiedzi NTP; pusty tekst = bez zastrzeżeń
+function Get-NtpSourceIssue($Ntp) {
+    if (-not $Ntp) { return '' }
+    if ($Ntp.RefId -eq 'VMTP') { return 'czas z hosta wirtualizacji (VM IC Time Synchronization Provider)' }
+    if ($Ntp.RefId -eq 'LOCL') { return 'zegar lokalny serwera (Local CMOS Clock) - brak zewnętrznego źródła czasu' }
+    if ($Ntp.Leap -eq 3 -or $Ntp.Stratum -eq 0 -or $Ntp.Stratum -ge 16) { return 'zegar niezsynchronizowany (usługa czasu nie ma działającego źródła)' }
+    ''
+}
+# Zapytanie NTP (UDP 123, tryb klienta) - zwykłe konto, bez uprawnień; $null przy braku odpowiedzi
+function Get-NtpInfo([string]$Computer, [int]$TimeoutMs = 3000) {
+    $udp = New-Object System.Net.Sockets.UdpClient
+    try {
+        $udp.Client.ReceiveTimeout = $TimeoutMs
+        $udp.Connect($Computer, 123)
+        $pkt = New-Object byte[] 48
+        $pkt[0] = 0x1B   # LI 0, wersja 3, tryb 3 (klient)
+        [void]$udp.Send($pkt, $pkt.Length)
+        $ep = New-Object System.Net.IPEndPoint ([System.Net.IPAddress]::Any, 0)
+        ConvertFrom-NtpResponse ($udp.Receive([ref]$ep))
+    } catch { $null }
+    finally { $udp.Close() }
 }
 
 # Czy na zdalnym hoście istnieje potok nazwany (zwykłe konto domenowe wystarcza)
@@ -1134,6 +1218,33 @@ function Test-GpoSecurityFilter([string[]]$Allow, [string[]]$Deny, [object[]]$To
         if ($ok) { $yes++ } else { $no++ }
     }
     if (-not $no) { 'Tak' } elseif (-not $yes) { 'Nie' } else { 'Czesc' }
+}
+# Podmioty dodawane przez GPO do lokalnej grupy Administrators - "Grupy z ograniczeniami" w GptTmpl.inf, sekcja [Group Membership]:
+#   *S-1-5-32-544__Members = *S-1-5-21-...-1105,FIRMA\helpdesk    (członkowie grupy Administrators)
+#   *S-1-5-21-...-1105__Memberof = *S-1-5-32-544                   (grupa dodawana do Administrators)
+# Zwraca wpisy tak, jak zapisano w pliku (SID bez gwiazdki albo nazwa).
+function Get-GptLocalAdmin([string[]]$Lines) {
+    $rx = '^(S-1-5-32-544|(BUILTIN\\)?(Administrators|Administratorzy))$'
+    $sec = ''
+    foreach ($line in $Lines) {
+        if ($line -match '^\s*\[(.+)\]\s*$') { $sec = $Matches[1]; continue }
+        if ($sec -ne 'Group Membership' -or $line -notmatch '^\s*\*?(.+?)__(Members|Memberof)\s*=\s*(.*)$') { continue }
+        $grp = $Matches[1].Trim(); $kind = $Matches[2]
+        $vals = @($Matches[3] -split ',' | ForEach-Object { $_.Trim().TrimStart('*') } | Where-Object { $_ })
+        if ($kind -ieq 'Members' -and $grp -match $rx) { $vals }
+        elseif ($kind -ieq 'Memberof' -and @($vals | Where-Object { $_ -match $rx }).Count) { $grp }
+    }
+}
+# To samo z preferencji GPO (Groups.xml): elementy Member z akcją ADD w grupie Administrators; zwraca SID albo nazwę
+function Get-GppLocalAdmin($Xml) {
+    if (-not $Xml) { return }
+    foreach ($p in @($Xml.SelectNodes('//Group/Properties'))) {
+        if ($p.GetAttribute('groupSid') -ne 'S-1-5-32-544' -and $p.GetAttribute('groupName') -notmatch '^(BUILTIN\\)?(Administrators|Administratorzy)\b') { continue }
+        foreach ($m in @($p.SelectNodes('Members/Member'))) {
+            if ($m.GetAttribute('action') -ine 'ADD') { continue }
+            if ($m.GetAttribute('sid')) { $m.GetAttribute('sid') } else { $m.GetAttribute('name') }
+        }
+    }
 }
 # Uwagi o pierwszeństwie i filtrach GPO kontrolerów domeny (do opisów DC-CIS-*): klucz = nazwa GPO lub DN kontenera
 $gpoDcNotes = [ordered]@{}
@@ -2612,7 +2723,22 @@ Invoke-Check 'ACL-TIER0' {
 
 #region ---------- usługi certyfikatów (AD CS) ----------
 # Konfiguracja PKI z partycji konfiguracji (czytelna dla każdego konta domeny): CA, opublikowane szablony, ich uprawnienia i flagi.
-# ESC6, ESC7, ESC11: ustawienia samego CA przez interfejs administracyjny CA (prawo Read). ESC10 (rejestr DC) nie jest oceniany.
+# ESC6, ESC7, ESC11: ustawienia samego CA przez interfejs administracyjny CA (prawo Read). ESC10 (rejestr DC): tylko z -UseWinRM.
+# Stan wiązania certyfikatów z kontami na DC z wartości rejestru (ESC10, doprecyzowanie ESC9).
+# Kdc\StrongCertificateBindingEnforcement: 0 = wyłączone, 1 = tryb zgodności, 2 lub brak = pełne wymuszanie (brak: domyślne od aktualizacji
+# z lutego 2025; aktualizacje od września 2025 ignorują wartość). Schannel\CertificateMappingMethods: bit 0x4 = mapowanie po UPN.
+function Get-CertBindingState($Kdc, $Map) {
+    $kdcTxt = if ($null -eq $Kdc) { 'nieustawione (pełne wymuszanie na DC z aktualizacjami od lutego 2025)' }
+              elseif ([int]$Kdc -ge 2) { "$Kdc (pełne wymuszanie)" } elseif ([int]$Kdc -eq 1) { '1 (tryb zgodności)' } else { '0 (wyłączone)' }
+    $mapTxt = if ($null -eq $Map) { 'nieustawione (domyślnie 0x18)' } else { '0x{0:X}' -f [int]$Map }
+    $why = @()
+    if ($null -ne $Kdc -and [int]$Kdc -lt 2) { $why += 'KDC przyjmuje certyfikaty bez silnego mapowania' }
+    if ($null -ne $Map -and ([int]$Map -band 4)) { $why += 'Schannel mapuje certyfikat na konto po UPN' }
+    [pscustomobject]@{
+        Kdc = $kdcTxt; Map = $mapTxt; Uwagi = ($why -join '; ')
+        KdcFull = ($null -eq $Kdc -or [int]$Kdc -ge 2); UpnMap = [bool]($null -ne $Map -and ([int]$Map -band 4))
+    }
+}
 $pkiEku = @{ '1.3.6.1.5.5.7.3.2' = 'Client Authentication'; '1.3.6.1.5.2.3.4' = 'PKINIT Client'; '1.3.6.1.4.1.311.20.2.2' = 'Smart Card Logon'
              '2.5.29.37.0' = 'Any Purpose'; '1.3.6.1.4.1.311.20.2.1' = 'Certificate Request Agent'; '1.3.6.1.5.5.7.3.1' = 'Server Authentication'
              '1.3.6.1.5.5.7.3.4' = 'Secure Email'; '1.3.6.1.4.1.311.10.3.4' = 'EFS'; '1.3.6.1.5.5.7.3.3' = 'Code Signing' }
@@ -2954,11 +3080,49 @@ Invoke-Check 'ADCS' {
         Fix = (Fx $verify, $issued, $unpub)
         Mitre = 'T1649'
     }
+    # ESC10 i doprecyzowanie ESC9: tryb wiązania certyfikatów z kontami w rejestrze każdego DC (tylko -UseWinRM)
+    $bindRows = [System.Collections.Generic.List[object]]::new()
+    $bindRead = 0
+    if ($UseWinRM -and -not $SkipDCChecks) {
+        foreach ($dc in $dcs) {
+            try {
+                $r = Invoke-Command -ComputerName $dc.HostName -ErrorAction Stop -ScriptBlock {
+                    [pscustomobject]@{
+                        Kdc = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Kdc' -ErrorAction SilentlyContinue).StrongCertificateBindingEnforcement
+                        Map = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\Schannel' -ErrorAction SilentlyContinue).CertificateMappingMethods
+                    }
+                }
+                $bindRead++
+                $bs = Get-CertBindingState $r.Kdc $r.Map
+                $bindRows.Add([pscustomobject]@{ DC = $dc.HostName; StrongCertificateBindingEnforcement = $bs.Kdc; CertificateMappingMethods = $bs.Map; Uwagi = $bs.Uwagi; KdcFull = $bs.KdcFull; UpnMap = $bs.UpnMap })
+            } catch {
+                $adcsUnk.Add([pscustomobject]@{ CA = "DC: $($dc.HostName)"; Test = 'ESC10 (rejestr DC przez WinRM)'; Przyczyna = $_.Exception.Message })
+            }
+        }
+        if (-not $bindRead) { $ruleNote['D-ADCS-ESC10'] = 'Nierozstrzygnięty (rejestr DC niedostępny przez WinRM)' }
+        $weakBind = @($bindRows | Where-Object { -not $_.KdcFull -or $_.UpnMap })
+        Add-IfAny @{
+            Id = 'D-ADCS-ESC10'; Category = $catPki; Severity = $(if (@($weakBind | Where-Object UpnMap).Count) { 'High' } else { 'Medium' })
+            Title = 'Kontrolery domeny ze słabym wiązaniem certyfikatów z kontami (ESC10)'
+            Objects = ($weakBind | Select-Object DC, StrongCertificateBindingEnforcement, CertificateMappingMethods, Uwagi)
+            Description = 'Kontroler domeny przyjmuje logowanie certyfikatem, który wiąże z kontem tylko po nazwie (UPN lub nazwie DNS), bez sprawdzenia identyfikatora SID. Kto ma prawo zapisu do innego konta (np. zmiany UPN), może uzyskać certyfikat i zalogować się jako administrator albo kontroler domeny. Dotyczy to Kerberos (PKINIT), gdy StrongCertificateBindingEnforcement ma wartość 0 lub 1, oraz logowania przez Schannel (np. LDAPS), gdy CertificateMappingMethods zawiera mapowanie po UPN (0x4). Na DC z aktualizacjami od września 2025 r. wartość StrongCertificateBindingEnforcement jest ignorowana (pełne wymuszanie) - wtedy wpis jest pozostałością do usunięcia; stan aktualizacji podaje sekcja o aktualizacjach DC.'
+            Recommendation = 'Sprawdzić w dzienniku System na DC zdarzenia KDC 39, 40 i 41 (certyfikaty bez silnego mapowania), wymienić takie certyfikaty lub dodać mapowanie w altSecurityIdentities, a potem ustawić pełne wymuszanie (2) albo usunąć wartość. W Schannel pozostawić wartość domyślną 0x18 (bez mapowania po UPN).'
+            Fix = (Fx 'Get-WinEvent -FilterHashtable @{LogName=''System'';ProviderName=''Microsoft-Windows-Kerberos-Key-Distribution-Center'';Id=39,40,41} -MaxEvents 200   # na DC',
+                      'reg add HKLM\SYSTEM\CurrentControlSet\Services\Kdc /v StrongCertificateBindingEnforcement /t REG_DWORD /d 2 /f   # na każdym DC, po wymianie certyfikatów',
+                      'reg add HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\Schannel /v CertificateMappingMethods /t REG_DWORD /d 0x18 /f   # na każdym DC')
+            Mitre = 'T1649'
+        }
+    }
+    # ESC9 zależy od trybu DC: przy pełnym wymuszaniu na wszystkich DC certyfikat bez SID nie zostanie przyjęty
+    $esc9Full = ($bindRead -eq $dcs.Count) -and $bindRows.Count -and -not @($bindRows | Where-Object { -not $_.KdcFull }).Count
+    $esc9Note = if ($esc9Full) { ' Rejestr wszystkich DC odczytany przez WinRM: żaden nie ma trybu zgodności ani wyłączonego wymuszania, więc na DC z aktualizacjami od lutego 2025 r. ryzyko jest tylko potencjalne (waga obniżona).' }
+                elseif ($bindRead) { " Odczyt rejestru DC przez WinRM: tryb zgodności lub wyłączone wymuszanie na $(@($bindRows | Where-Object { -not $_.KdcFull } | ForEach-Object { $_.DC }) -join ', ')$(if ($bindRead -lt $dcs.Count) { '; części DC nie odczytano' }) - patrz D-ADCS-ESC10." }
+                else { ' Trybu DC nie odczytano (wymaga -UseWinRM), więc ryzyko jest warunkowe.' }
     Add-IfAny @{
-        Id = 'D-ADCS-ESC9'; Category = $catPki; Severity = (& $sevOf $esc[9] 'Medium' 'Low')
+        Id = 'D-ADCS-ESC9'; Category = $catPki; Severity = $(if ($esc9Full) { 'Low' } else { & $sevOf $esc[9] 'Medium' 'Low' })
         Title = 'Szablony certyfikatów bez rozszerzenia zabezpieczeń SID (ESC9)'
         Objects = (& $show $esc[9])
-        Description = 'Szablon ma flagę CT_FLAG_NO_SECURITY_EXTENSION, więc certyfikat nie zawiera SID właściciela i DC wiąże go z kontem tylko po nazwie. Kto ma prawo zapisu do innego konta (np. zmiany UPN), może uzyskać certyfikat podszywający się pod administratora. Ryzyko znika, gdy wszystkie DC działają w trybie pełnego wymuszania silnego mapowania certyfikatów (StrongCertificateBindingEnforcement = 2, domyślnie od aktualizacji z 2025 r.).'
+        Description = 'Szablon ma flagę CT_FLAG_NO_SECURITY_EXTENSION, więc certyfikat nie zawiera SID właściciela i DC wiąże go z kontem tylko po nazwie. Kto ma prawo zapisu do innego konta (np. zmiany UPN), może uzyskać certyfikat podszywający się pod administratora. Ryzyko znika, gdy wszystkie DC działają w trybie pełnego wymuszania silnego mapowania certyfikatów (StrongCertificateBindingEnforcement = 2, domyślnie od aktualizacji z 2025 r.).' + $esc9Note
         Recommendation = 'Usunąć flagę z szablonu, jeśli nie jest wymagana przez aplikację; potwierdzić tryb pełnego wymuszania na wszystkich DC.'
         Fix = (Fx $verify, 'reg query HKLM\SYSTEM\CurrentControlSet\Services\Kdc /v StrongCertificateBindingEnforcement   # na każdym DC: 2 = pełne wymuszanie')
         Mitre = 'T1649'
@@ -4035,6 +4199,71 @@ if (-not $SkipDCChecks) {
             Mitre = 'T1552.006'
         }
     }
+
+    # Lokalni administratorzy nadawani przez GPO: "Grupy z ograniczeniami" (GptTmpl.inf) i preferencje (Groups.xml) w GPO z aktywnym łączem.
+    # Zgłaszane są konta i grupy domenowe spoza administratorów; konta lokalne i nazwy nierozpoznane na stacji przeglądu są pomijane.
+    Invoke-Check 'GPO-ADMINS' {
+        $links = @{}
+        $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
+        foreach ($h in $holders) {
+            foreach ($l in @(ConvertFrom-GpLink "$($h.gplink)")) {
+                if ($l.Disabled) { continue }
+                $k = $l.Dn.ToLower()
+                if (-not $links.ContainsKey($k)) { $links[$k] = [System.Collections.Generic.List[string]]::new() }
+                $links[$k].Add("$($h.distinguishedname)")
+            }
+        }
+        $broadSid = @{}; foreach ($x in 'S-1-1-0', 'S-1-5-11', 'S-1-5-4', 'S-1-5-32-545', "$dSid-513", "$dSid-515") { $broadSid[$x] = $true }
+        $adminSid = @{}; foreach ($x in @('S-1-5-32-544', 'S-1-5-18', "$dSid-500", "$dSid-512", "$dSid-519") + @($privGroups.Values)) { $adminSid["$x"] = $true }
+        $dcOu = "$($domain.DomainControllersContainer)"
+        $unread = 0
+        $rows = foreach ($g in @(Find-Ldap -SearchBase "CN=Policies,CN=System,$domainDn" -Scope OneLevel -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, gPCFileSysPath, flags)) {
+            $k = "$($g.distinguishedname)".ToLower()
+            if (-not $links.ContainsKey($k) -or ([int]$g.flags -band 2) -or -not $g.gpcfilesyspath) { continue }
+            $found = [System.Collections.Generic.List[object]]::new()
+            $inf = Join-Path $g.gpcfilesyspath 'Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
+            if (Test-Path -LiteralPath $inf) {
+                try { foreach ($v in @(Get-GptLocalAdmin (Get-Content -LiteralPath $inf -Encoding Unicode -ErrorAction Stop))) { $found.Add([pscustomobject]@{ Wpis = "$v"; Zrodlo = 'Grupy z ograniczeniami (Restricted Groups)' }) } }
+                catch { $unread++ }
+            }
+            $xmlFile = Join-Path $g.gpcfilesyspath 'Machine\Preferences\Groups\Groups.xml'
+            if (Test-Path -LiteralPath $xmlFile) {
+                try { foreach ($v in @(Get-GppLocalAdmin ([xml](Get-Content -LiteralPath $xmlFile -Raw -ErrorAction Stop)))) { $found.Add([pscustomobject]@{ Wpis = "$v"; Zrodlo = 'Preferencje (Groups.xml)' }) } }
+                catch { $unread++ }
+            }
+            if (-not $found.Count) { continue }
+            $where  = @($links[$k])
+            $onDc   = @($where | Where-Object { $_ -ieq $domainDn -or $_ -ieq $dcOu -or $_ -like "*,$dcOu" }).Count -gt 0
+            $scope  = (@($where | ForEach-Object { if ($_ -ieq $domainDn) { 'domena' } else { ($_ -split '(?<!\\),')[0] -replace '^(OU|CN)=', '' } }) | Sort-Object -Unique) -join ', '
+            foreach ($e in $found) {
+                $sid = ConvertTo-Sid $e.Wpis
+                # tylko podmioty domenowe i szerokie grupy wbudowane; konta lokalne i nazwy nierozpoznane - poza zakresem
+                if ($sid -notmatch '^S-1-' -or (-not $broadSid.ContainsKey($sid) -and $sid -notlike 'S-1-5-21-*')) { continue }
+                if ($adminSid.ContainsKey($sid) -or $privBySid.ContainsKey($sid)) { continue }
+                # grupa zagnieżdżona w grupie administratorów ma te uprawnienia i bez GPO
+                if (-not $broadSid.ContainsKey($sid) -and @(Get-PrincipalGroupSids $sid | Where-Object { $_ -ne $sid -and $adminSid.ContainsKey("$_") }).Count) { continue }
+                [pscustomobject]@{
+                    GPO = "$($g.displayname)"; Zrodlo = $e.Zrodlo; Podmiot = (Resolve-SidName $sid); Czlonkowie = (Get-PrincipalMemberList $sid)
+                    Podlinkowane = $scope; ObejmujeDC = $(if ($onDc) { 'Tak' } else { 'Nie' }); SzerokaGrupa = $(if ($broadSid.ContainsKey($sid)) { 'Tak' } else { 'Nie' }); SID = $sid
+                }
+            }
+        }
+        $rows = @($rows | Sort-Object GPO, Podmiot, Zrodlo -Unique)
+        if (-not $rows.Count -and $unread) { $ruleNote['D-GPO-LOCALADMIN'] = "Nierozstrzygnięty ($unread plików GPO nieczytelnych dla konta przeglądu)" }
+        Add-IfAny @{
+            Id = 'D-GPO-LOCALADMIN'; Category = $catDom
+            Severity = $(if (@($rows | Where-Object SzerokaGrupa -eq 'Tak').Count) { 'Critical' } elseif (@($rows | Where-Object ObejmujeDC -eq 'Tak').Count) { 'High' } else { 'Low' })
+            Title = 'Konta i grupy spoza administratorów dodawane przez GPO do lokalnych administratorów'
+            Objects = $rows
+            Description = 'Zasady grupy dodają te konta lub grupy do lokalnej grupy Administrators na komputerach objętych GPO. Każdy członek takiej grupy ma pełną kontrolę nad tymi komputerami: może odczytać z pamięci poświadczenia zalogowanych tam osób, także administratorów domeny, i przejść na kolejne systemy. GPO podlinkowane do domeny lub OU Domain Controllers (kolumna ObejmujeDC) działa również na kontrolerach domeny, gdzie grupa Administrators oznacza administratorów całej domeny. Szeroka grupa (Domain Users, Authenticated Users itp.) daje te uprawnienia każdemu użytkownikowi. Kolumna Podlinkowane pokazuje miejsca łączy, bez oceny filtrowania zabezpieczeń i filtrów WMI.'
+            Recommendation = 'Sprawdzić, czy każdy wpis jest potrzebny i udokumentowany. Uprawnienia lokalnego administratora nadawać osobnym grupom dla stacji i dla serwerów, GPO linkować do właściwych OU, nigdy do domeny ani OU Domain Controllers. Usunąć szerokie grupy. Do pracy wsparcia używać haseł z Windows LAPS zamiast stałego członkostwa.'
+            Fix = (Fx '# GPMC > GPO z kolumny GPO > Computer Configuration > Policies > Windows Settings > Security Settings > Restricted Groups',
+                      '# albo Computer Configuration > Preferences > Control Panel Settings > Local Users and Groups',
+                      'Get-GPOReport -Name "<GPO>" -ReportType Html -Path C:\Temp\gpo.html   # pełna treść GPO',
+                      'Get-LocalGroupMember -SID S-1-5-32-544   # na komputerze objętym GPO: stan rzeczywisty')
+            Mitre = 'T1078.002'
+        }
+    }
 }
 #endregion
 
@@ -4755,6 +4984,37 @@ if (-not $SkipDCChecks) {
                 Fix = (Fx 'w32tm /config /syncfromflags:domhier /update   # na DC innym niż PDC', 'w32tm /config /manualpeerlist:"0.pl.pool.ntp.org 1.pl.pool.ntp.org" /syncfromflags:manual /reliable:yes /update   # na PDC', 'w32tm /resync /rediscover')
             }
         }
+
+        # Źródło czasu PDC Emulatora: cała domena bierze czas z PDC, więc jego źródło decyduje o czasie wszystkich DC i stacji.
+        # Zapytanie NTP zwykłym kontem; z -UseWinRM dodatkowo źródło podawane przez w32tm na PDC.
+        $ntp = Get-NtpInfo $pdc
+        if (-not $ntp) {
+            $healthUnk.Add([pscustomobject]@{ DC = $pdc; Test = 'Źródło czasu PDC (NTP, UDP 123)'; Blad = 'brak odpowiedzi' })
+            $ruleNote['DC-TIME-SOURCE'] = 'Nierozstrzygnięty (brak odpowiedzi NTP z PDC)'
+        } else {
+            $w32 = ''
+            if ($UseWinRM) {
+                try { $w32 = "$(Invoke-Command -ComputerName $pdc -ErrorAction Stop -ScriptBlock { (& w32tm.exe /query /source 2>$null) -join ' ' })".Trim() } catch { $w32 = '' }
+            }
+            $issue = Get-NtpSourceIssue $ntp
+            if (-not $issue -and $w32 -match 'VM IC Time Synchronization Provider') { $issue = 'czas z hosta wirtualizacji (VM IC Time Synchronization Provider)' }
+            elseif (-not $issue -and $w32 -match 'Local CMOS Clock|Free-running System Clock') { $issue = 'zegar lokalny serwera - brak zewnętrznego źródła czasu' }
+            if ($issue) {
+                $srcRow = [pscustomobject]@{ PDC = $pdc; Problem = $issue; Stratum = $ntp.Stratum; IdentyfikatorZrodla = $ntp.RefId; Zsynchronizowany = $(if ($ntp.Leap -eq 3) { 'Nie' } else { 'Tak' }) }
+                if ($w32) { $srcRow | Add-Member -NotePropertyName ZrodloW32tm -NotePropertyValue $w32 }
+                Add-Finding @{
+                    Id = 'DC-TIME-SOURCE'; Category = $catHealth; Severity = 'Medium'
+                    Title = "PDC Emulator nie ma wiarygodnego źródła czasu: $issue"
+                    Objects = @($srcRow)
+                    Description = 'Wszystkie kontrolery domeny i stacje biorą czas z PDC Emulatora, a Kerberos odrzuca logowanie przy różnicy powyżej 5 minut. Gdy PDC synchronizuje się z zegarem hosta wirtualizacji albo z własnym zegarem sprzętowym, błąd lub dryf tego zegara przenosi się na całą domenę - także wtedy, gdy na PDC wpisano serwery NTP, bo dostawca czasu Hyper-V ma pierwszeństwo. Test DC-TIME tego nie wykryje: mierzy tylko różnicę pozostałych DC względem PDC.'
+                    Recommendation = 'Na PDC Emulatorze ustawić zewnętrzne źródła NTP i oznaczyć go jako wiarygodne źródło czasu. Na wirtualnym PDC wyłączyć dostawcę czasu Hyper-V (VMICTimeProvider) w rejestrze maszyny - usługa integracji może pozostać włączona. Pozostałe DC zostawić na hierarchii domeny (NT5DS). Po zmianie sprawdzić źródło poleceniem w32tm /query /source.'
+                    Fix = (Fx 'w32tm /query /status   # na PDC: źródło, warstwa, ostatnia synchronizacja',
+                              'w32tm /config /manualpeerlist:"0.pl.pool.ntp.org 1.pl.pool.ntp.org,0x8" /syncfromflags:manual /reliable:yes /update   # na PDC',
+                              'reg add HKLM\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\VMICTimeProvider /v Enabled /t REG_DWORD /d 0 /f   # na wirtualnym PDC',
+                              'Restart-Service w32time; w32tm /resync /rediscover; w32tm /query /source')
+                }
+            }
+        }
     }
 
     Invoke-Check 'GPO-SYNC' {
@@ -4929,6 +5189,7 @@ $foundIds  = @($real | ForEach-Object { $_.Id })
 $ruleStatus = @(foreach ($r in $ruleCatalog) {
     $f  = $real | Where-Object Id -eq $r.Id | Select-Object -First 1
     $st = if ($f) { 'Znalezisko' }
+          elseif (-not (Test-CheckSelected $r.C)) { 'Pominięty (-IncludeCheck / -ExcludeCheck)' }
           elseif ($r.W -and $SkipDCChecks) { 'Pominięty (-SkipDCChecks)' }
           elseif ($r.W -eq 'WinRM' -and -not $UseWinRM) { 'Wymaga -UseWinRM' }
           elseif ($runAsPriv -and $r.Id -in @('DC-NETSESSION', 'C-LAPS-READABLE')) { 'Pominięty (konto uprzywilejowane)' }
@@ -4989,6 +5250,31 @@ foreach ($k in 1..3) {
     $planSum[$k] = @([double](($g | ForEach-Object { $_.GodzinyMin } | Measure-Object -Sum).Sum), [double](($g | ForEach-Object { $_.GodzinyMax } | Measure-Object -Sum).Sum), $g.Count)
 }
 
+# Porównanie obiektów znaleziska między przeglądami. Klucz obiektu: ukryta kolumna _Id (SID konta lub komputera, od 0.31) -
+# zmiana nazwy nie wygląda wtedy jak nowy obiekt; gdy któraś strona jej nie ma (starszy raport, wiersze bez SID) - pierwsza kolumna.
+function Compare-FindingObject([object[]]$PrevRows, [object[]]$CurrRows) {
+    $PrevRows = @($PrevRows | Where-Object { $_ }); $CurrRows = @($CurrRows | Where-Object { $_ })
+    $hasId = { param($Rows) @($Rows | Where-Object { $_.PSObject.Properties['_Id'] -and "$($_._Id)" }).Count -gt 0 }
+    $byId  = (& $hasId $PrevRows) -and (& $hasId $CurrRows)
+    $index = { param($Rows)
+        $h = [ordered]@{}
+        foreach ($r in $Rows) {
+            $label = if ($r -is [string] -or $r -is [ValueType]) { "$r" } else { "$(@($r.PSObject.Properties)[0].Value)" }
+            $key = if ($byId -and $r.PSObject.Properties['_Id'] -and "$($r._Id)") { "id:$($r._Id)" } else { "n:$label".ToLower() }
+            if (-not $h.Contains($key)) { $h[$key] = $label }
+        }
+        $h
+    }
+    $p = & $index $PrevRows; $c = & $index $CurrRows
+    $new  = @($c.Keys | Where-Object { -not $p.Contains($_) } | ForEach-Object { $c[$_] })
+    $gone = @($p.Keys | Where-Object { -not $c.Contains($_) } | ForEach-Object { $p[$_] })
+    $show = { param($L) (@($L | Select-Object -First 5) -join '; ') + $(if (@($L).Count -gt 5) { " (+$(@($L).Count - 5))" } else { '' }) }
+    [pscustomobject]@{
+        Bylo = $p.Count; Jest = $c.Count; Nowe = $new.Count; Usuniete = $gone.Count
+        NowePrzyklady = (& $show $new); UsunietePrzyklady = (& $show $gone); Klucz = $(if ($byId) { 'SID' } else { 'nazwa' })
+    }
+}
+
 $diff = $null
 if ($Previous) {
     # $prev wczytany i sprawdzony (Meta, SchemaVersion) w regionie wymagań
@@ -5005,8 +5291,22 @@ if ($Previous) {
         # Critical, których wcześniej nie było jako Critical (nowe Id albo podniesiona waga)
         NoweCritical    = @($real | Where-Object { $_.Severity -eq 'Critical' -and $_.Id -notin $prevCrit } | ForEach-Object { $_.Id } | Select-Object -Unique)
         Usuniete        = @($prevIds | Where-Object { $_ -notin $currIds })
+        Obiekty         = @()
         RozneTryby      = @()
     }
+    # Znaleziska obecne w obu przeglądach: które obiekty doszły, a które zniknęły
+    $diff.Obiekty = @(foreach ($f in $real) {
+        $pf = @($prev.Znaleziska | Where-Object { $_.Id -eq $f.Id -and $_.Severity -ne 'Info' })[0]
+        if (-not $pf) { continue }
+        $pr = if (@($pf.Detail | Where-Object { $_ }).Count) { $pf.Detail } else { $pf.Objects }
+        $cr = if (@($f.Detail).Count) { $f.Detail } else { $f.Objects }
+        $cmp = Compare-FindingObject @($pr) @($cr)
+        if ($cmp.Nowe -or $cmp.Usuniete -or "$($pf.Severity)" -ne $f.Severity) {
+            [pscustomobject]@{ Id = $f.Id; Waga = $(if ("$($pf.Severity)" -ne $f.Severity) { "$($pf.Severity) -> $($f.Severity)" } else { $f.Severity })
+                               Bylo = $cmp.Bylo; Jest = $cmp.Jest; Nowe = $cmp.Nowe; Usuniete = $cmp.Usuniete
+                               NoweObiekty = $cmp.NowePrzyklady; UsunieteObiekty = $cmp.UsunietePrzyklady; Klucz = $cmp.Klucz }
+        }
+    })
     # Przebiegi w innym trybie widzą inne dane (źródło testów DC, zakres widoczny dla konta) - zmiany mogą nie wynikać ze zmian w AD
     $modeDiff = [System.Collections.Generic.List[string]]::new()
     if ("$($prev.Meta.TestyDC)" -and (Get-DcMethodNormalized "$($prev.Meta.TestyDC)") -ne $dcMethod) { $modeDiff.Add("testy DC: poprzednio '$($prev.Meta.TestyDC)', teraz '$dcMethod'") }
@@ -5016,6 +5316,8 @@ if ($Previous) {
     if ($prev.Meta.PSObject.Properties.Name -contains 'KontoUprzywilejowane') {
         if ([bool]$prev.Meta.KontoUprzywilejowane -ne $runAsPriv) { $modeDiff.Add("uprawnienia konta: poprzednio $(if ($prev.Meta.KontoUprzywilejowane) { 'uprzywilejowane' } else { 'zwykłe' }), teraz $(if ($runAsPriv) { 'uprzywilejowane' } else { 'zwykłe' })") }
     }
+    $prevPartial = [bool]($prev.Meta.PSObject.Properties['Czesciowy'] -and $prev.Meta.Czesciowy)
+    if ($prevPartial -or $partialRun) { $modeDiff.Add("zakres testów: poprzednio $(if ($prevPartial) { 'częściowy' } else { 'pełny' }), teraz $(if ($partialRun) { 'częściowy (-IncludeCheck / -ExcludeCheck)' } else { 'pełny' })") }
     $diff.RozneTryby = @($modeDiff)
     if ($modeDiff.Count) { Write-Step "  -Previous: poprzedni przegląd w innym trybie ($($modeDiff -join '; ')) - część różnic może wynikać z trybu, nie ze zmian w AD" 'Yellow' }
 }
@@ -5037,6 +5339,8 @@ $meta = [ordered]@{
     TestyDC   = $dcMethod
     KontoUprzywilejowane = $runAsPriv
     ZgodnoscDC = $(if ($dcCompliance.Count) { $dcCompliance } else { $null })
+    Czesciowy  = $partialRun
+    TestyWybrane = $(if ($partialRun) { [ordered]@{ Include = @($checkInclude); Exclude = @($checkExclude) } } else { $null })
 }
 
 # ---------- historia przeglądów (-History) ----------
@@ -5131,6 +5435,8 @@ if ($History) {
                 if (-not $j.Meta -or $sv.Split('.')[0] -ne $jsonSchemaVersion.Split('.')[0]) { $historySkipped++; continue }
                 # tylko ten sam klient i domena - raporty innych klientów w tym samym katalogu nie mogą trafić do raportu
                 if ("$($j.Meta.Klient)" -ne $Klient -or "$($j.Meta.Domena)" -ne $domain.DNSRoot) { continue }
+                # przegląd częściowy (-IncludeCheck / -ExcludeCheck) ma wynik nieporównywalny z pełnym
+                if ($j.Meta.PSObject.Properties['Czesciowy'] -and $j.Meta.Czesciowy) { continue }
                 $hist.Add((ConvertTo-HistoryPoint $j))
             } catch { $historySkipped++ }
         }
@@ -5190,7 +5496,7 @@ $objRows = foreach ($f in $sorted) {
             Znalezisko = $f.Id
             Waga       = $f.Severity
             Obiekt     = $p[0].Value
-            Szczegoly  = ($p | Select-Object -Skip 1 | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join '; '
+            Szczegoly  = ($p | Select-Object -Skip 1 | Where-Object { $_.Name -notlike '_*' } | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join '; '
         }
     }
 }
@@ -5202,7 +5508,7 @@ function HtmlEnc([string]$s) { [System.Net.WebUtility]::HtmlEncode($s) }
 function ConvertTo-HtmlTable([object[]]$Rows, [int]$Max = [int]::MaxValue) {
     $Rows = @($Rows | Where-Object { $_ })
     if ($Rows.Count -eq 0) { return '<p class="note">Brak danych.</p>' }
-    $cols = @($Rows[0].PSObject.Properties.Name)
+    $cols = @($Rows[0].PSObject.Properties.Name | Where-Object { $_ -notlike '_*' })
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.Append('<div class="tw"><table><thead><tr>')
     foreach ($c in $cols) { [void]$sb.Append("<th>$(HtmlEnc $c)</th>") }
@@ -5328,6 +5634,10 @@ $whoHtml = if (-not $ldapIdentity) { "<b>Konto:</b> $(HtmlEnc $meta.Uruchomil)$p
            else { "<b>Uruchomił:</b> $(HtmlEnc $meta.Uruchomil) ze stacji $(HtmlEnc $env:COMPUTERNAME) &nbsp;|&nbsp; <b>Konto LDAP:</b> $(HtmlEnc $ldapIdentity)$privTag" }
 [void]$sb.Append("<p>$whoHtml &nbsp;|&nbsp; <b>Testy DC:</b> $(HtmlEnc $dcMethod) &nbsp;|&nbsp; ADCheck $Version</p></div></div>")
 [void]$sb.Append('<div class="conf">DOKUMENT POUFNY - zawiera informacje o podatnościach infrastruktury</div></header>')
+if ($partialRun) {
+    $selTxt = @($(if ($checkInclude.Count) { "tylko testy: $($checkInclude -join ', ')" }), $(if ($checkExclude.Count) { "bez testów: $($checkExclude -join ', ')" })) | Where-Object { $_ }
+    [void]$sb.Append("<p class=`"note`"><b>Przegląd częściowy</b> ($(HtmlEnc ($selTxt -join '; '))). Wynik i klasa ekspozycji obejmują tylko wykonane testy - nie należy ich porównywać z pełnym przeglądem.</p>")
+}
 
 function Get-ScoreClass([int]$Points) { if ($Points -ge 30) { 'r3' } elseif ($Points -ge 10) { 'r2' } elseif ($Points -ge 1) { 'r1' } else { 'r0' } }
 function Get-MitreLink([string]$Id) {
@@ -5394,7 +5704,15 @@ if ($diff) {
     if (@($diff.NoweCritical).Count) {
         [void]$sb.Append("<p><b>Nowe znaleziska Critical:</b> $(HtmlEnc ($diff.NoweCritical -join ', '))</p>")
     }
-    [void]$sb.Append("<p><b>Nowe znaleziska:</b> $(HtmlEnc (($diff.Nowe) -join ', '))</p><p><b>Usunięte (naprawione):</b> $(HtmlEnc (($diff.Usuniete) -join ', '))</p></section>")
+    [void]$sb.Append("<p><b>Nowe znaleziska:</b> $(HtmlEnc (($diff.Nowe) -join ', '))</p><p><b>Usunięte (naprawione):</b> $(HtmlEnc (($diff.Usuniete) -join ', '))</p>")
+    if (@($diff.Obiekty).Count) {
+        [void]$sb.Append('<div class="lbl">Zmiany obiektów w znaleziskach obecnych w obu przeglądach</div>')
+        [void]$sb.Append((ConvertTo-HtmlTable @($diff.Obiekty | Select-Object Id, Waga, Bylo, Jest, Nowe, Usuniete, NoweObiekty, UsunieteObiekty)))
+        if (@($diff.Obiekty | Where-Object Klucz -eq 'nazwa').Count) {
+            [void]$sb.Append('<p class="note">Obiekty porównano po nazwie tam, gdzie raport nie zawiera identyfikatora (SID) - poprzedni raport sprzed wersji 0.31 albo wiersze inne niż konta i komputery. Zmiana nazwy obiektu wygląda wtedy jak usunięcie i dodanie.</p>')
+        }
+    }
+    [void]$sb.Append('</section>')
 }
 
 if ($History) {

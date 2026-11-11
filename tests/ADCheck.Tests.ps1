@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg', 'ConvertFrom-GpLink', 'Get-GpoApplyOrder', 'Get-GpoApplySids', 'Test-GpoSecurityFilter'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg', 'ConvertFrom-GpLink', 'Get-GpoApplyOrder', 'Get-GpoApplySids', 'Test-GpoSecurityFilter', 'Get-CheckKey', 'Resolve-CheckList', 'Compare-FindingObject', 'Get-CertBindingState', 'ConvertFrom-NtpResponse', 'Get-NtpSourceIssue', 'Get-GptLocalAdmin', 'Get-GppLocalAdmin'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -455,5 +455,220 @@ Describe 'Pierwszeństwo GPO' {
         $f = Get-GpoApplySids $sd
         $f.Allow | Should -Be @('S-1-5-11')
         $f.Deny | Should -Be @('S-1-5-21-1-2-3-1105')
+    }
+}
+
+Describe 'Wybór testów (-IncludeCheck / -ExcludeCheck)' {
+    BeforeAll {
+        $known = [string[]]@('ADCS', 'DC-NET', 'DC-OS', 'DC-PROBE', 'DOMAIN', 'PRIV')
+        $cat = @(@{ Id = 'D-ADCS-ESC1'; C = 'ADCS' }, @{ Id = 'D-DNS-CREATECHILD'; C = 'DNS-ZONES' }, @{ Id = 'DC-SMB1'; C = 'DC-PROBE' })
+    }
+    It 'Get-CheckKey: sondy DC i DC-GPO jako DC-PROBE, strefy DNS w teście DOMAIN' {
+        Get-CheckKey 'adcs' $known | Should -Be 'ADCS'
+        Get-CheckKey 'DC-OS' $known | Should -Be 'DC-OS'
+        Get-CheckKey 'DC-GPO' $known | Should -Be 'DC-PROBE'
+        Get-CheckKey 'DC-SRV01' $known | Should -Be 'DC-PROBE'
+        Get-CheckKey 'DNS-ZONES' $known | Should -Be 'DOMAIN'
+    }
+    It 'Resolve-CheckList: Id reguły, lista z przecinkami, nieznane nazwy' {
+        $unk = [System.Collections.Generic.List[string]]::new()
+        $r = @(Resolve-CheckList @('D-ADCS-ESC1', 'priv, D-DNS-CREATECHILD', 'DC-SMB1', 'NIEMA') $cat $known $unk)
+        ($r -join '|') | Should -Be 'ADCS|PRIV|DOMAIN|DC-PROBE'
+        ($unk -join '|') | Should -Be 'NIEMA'
+        @(Resolve-CheckList $null $cat $known $unk).Count | Should -Be 0
+    }
+}
+
+Describe 'Compare-FindingObject' {
+    It 'po SID: zmiana nazwy konta nie jest nowym obiektem' {
+        $prev = @([pscustomobject]@{ Konto = 'j.kowalski'; _Id = 'S-1-5-21-1-2-3-1105' }, [pscustomobject]@{ Konto = 'a.nowak'; _Id = 'S-1-5-21-1-2-3-1106' })
+        $curr = @([pscustomobject]@{ Konto = 'j.kowalski-nowy'; _Id = 'S-1-5-21-1-2-3-1105' }, [pscustomobject]@{ Konto = 'p.wisniewski'; _Id = 'S-1-5-21-1-2-3-1107' })
+        $c = Compare-FindingObject $prev $curr
+        $c.Klucz | Should -Be 'SID'
+        $c.Bylo | Should -Be 2; $c.Jest | Should -Be 2
+        $c.Nowe | Should -Be 1; $c.NowePrzyklady | Should -Be 'p.wisniewski'
+        $c.Usuniete | Should -Be 1; $c.UsunietePrzyklady | Should -Be 'a.nowak'
+    }
+    It 'bez identyfikatora po jednej stronie: po pierwszej kolumnie, bez rozróżniania wielkości liter' {
+        $prev = @([pscustomobject]@{ Konto = 'J.Kowalski' }, [pscustomobject]@{ Konto = 'a.nowak' })
+        $curr = @([pscustomobject]@{ Konto = 'j.kowalski'; _Id = 'S-1-5-21-1-2-3-1105' })
+        $c = Compare-FindingObject $prev $curr
+        $c.Klucz | Should -Be 'nazwa'
+        $c.Nowe | Should -Be 0
+        $c.Usuniete | Should -Be 1
+    }
+    It 'puste listy i skrót przykładów' {
+        $c = Compare-FindingObject @() @()
+        $c.Nowe | Should -Be 0; $c.Usuniete | Should -Be 0
+        $curr = 1..7 | ForEach-Object { [pscustomobject]@{ Obiekt = "o$_" } }
+        (Compare-FindingObject @() $curr).NowePrzyklady | Should -Be 'o1; o2; o3; o4; o5 (+2)'
+    }
+}
+
+Describe 'Get-CertBindingState (ESC10)' {
+    It 'brak wartości i 2: pełne wymuszanie' {
+        (Get-CertBindingState $null $null).KdcFull | Should -BeTrue
+        (Get-CertBindingState 2 0x18).KdcFull | Should -BeTrue
+        (Get-CertBindingState 2 0x18).UpnMap | Should -BeFalse
+        (Get-CertBindingState $null $null).Uwagi | Should -BeNullOrEmpty
+    }
+    It 'tryb zgodności, wyłączone, mapowanie po UPN' {
+        $s = Get-CertBindingState 1 0x1F
+        $s.KdcFull | Should -BeFalse
+        $s.UpnMap | Should -BeTrue
+        $s.Map | Should -Be '0x1F'
+        (Get-CertBindingState 0 $null).Kdc | Should -Be '0 (wyłączone)'
+        (Get-CertBindingState 0 $null).KdcFull | Should -BeFalse
+    }
+}
+
+Describe 'Źródło czasu (NTP)' {
+    BeforeAll {
+        function New-Ntp([int]$First, [int]$Stratum, [byte[]]$Ref) {
+            $b = New-Object byte[] 48
+            $b[0] = [byte]$First; $b[1] = [byte]$Stratum
+            for ($i = 0; $i -lt 4; $i++) { $b[12 + $i] = $Ref[$i] }
+            , $b
+        }
+    }
+    It 'źródło IP na stratum 2: bez zastrzeżeń' {
+        $n = ConvertFrom-NtpResponse (New-Ntp 0x1C 2 ([byte[]](192, 168, 1, 10)))
+        $n.Leap | Should -Be 0
+        $n.Stratum | Should -Be 2
+        $n.RefId | Should -Be '192.168.1.10'
+        Get-NtpSourceIssue $n | Should -BeNullOrEmpty
+    }
+    It 'dostawca czasu Hyper-V (VMTP) i zegar lokalny (LOCL)' {
+        $vm = ConvertFrom-NtpResponse (New-Ntp 0x1C 2 ([System.Text.Encoding]::ASCII.GetBytes('VMTP')))
+        $vm.RefId | Should -Be 'VMTP'
+        Get-NtpSourceIssue $vm | Should -Match 'hosta wirtualizacji'
+        $lo = ConvertFrom-NtpResponse (New-Ntp 0x1C 1 ([System.Text.Encoding]::ASCII.GetBytes('LOCL')))
+        Get-NtpSourceIssue $lo | Should -Match 'zegar lokalny'
+    }
+    It 'zegar niezsynchronizowany (Leap Indicator 3) i za krótka odpowiedź' {
+        $n = ConvertFrom-NtpResponse (New-Ntp 0xDC 0 ([byte[]](0, 0, 0, 0)))
+        $n.Leap | Should -Be 3
+        Get-NtpSourceIssue $n | Should -Match 'niezsynchronizowany'
+        ConvertFrom-NtpResponse ([byte[]](1, 2, 3)) | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Lokalni administratorzy z GPO' {
+    It 'Get-GptLocalAdmin: Members grupy Administrators i Memberof' {
+        $inf = @(
+            '[Unicode]', 'Unicode=yes',
+            '[Group Membership]',
+            '*S-1-5-32-544__Memberof =',
+            '*S-1-5-32-544__Members = *S-1-5-21-1-2-3-1105,FIRMA\helpdesk',
+            '*S-1-5-21-1-2-3-1200__Memberof = *S-1-5-32-544',
+            '*S-1-5-21-1-2-3-1300__Memberof = *S-1-5-32-555',
+            '*S-1-5-32-555__Members = *S-1-5-21-1-2-3-1400',
+            '[Privilege Rights]',
+            'SeBackupPrivilege = *S-1-5-32-544'
+        )
+        $r = @(Get-GptLocalAdmin $inf)
+        ($r -join '|') | Should -Be 'S-1-5-21-1-2-3-1105|FIRMA\helpdesk|S-1-5-21-1-2-3-1200'
+    }
+    It 'Get-GppLocalAdmin: tylko akcja ADD w grupie Administrators' {
+        $x = [xml]@'
+<Groups>
+  <Group name="Administrators (built-in)"><Properties action="U" groupSid="S-1-5-32-544" groupName="Administrators (built-in)">
+    <Members>
+      <Member name="FIRMA\helpdesk" action="ADD" sid="S-1-5-21-1-2-3-1105"/>
+      <Member name="FIRMA\stary" action="REMOVE" sid="S-1-5-21-1-2-3-1106"/>
+      <Member name="FIRMA\bezsid" action="ADD" sid=""/>
+    </Members></Properties></Group>
+  <Group name="Remote Desktop Users (built-in)"><Properties action="U" groupSid="S-1-5-32-555" groupName="Remote Desktop Users (built-in)">
+    <Members><Member name="FIRMA\rdp" action="ADD" sid="S-1-5-21-1-2-3-1107"/></Members></Properties></Group>
+</Groups>
+'@
+        $r = @(Get-GppLocalAdmin $x)
+        ($r -join '|') | Should -Be 'S-1-5-21-1-2-3-1105|FIRMA\bezsid'
+    }
+}
+
+# Warstwa raportu bez AD: funkcje i tabele ze skryptu, znaleziska z pliku przykładowego, a potem kod regionów
+# "wynik: dane" i "wynik: pliki" wykonany tak jak w skrypcie.
+Describe 'Raport z danych przykładowych (HTML, JSON, CSV)' {
+    BeforeAll {
+        foreach ($d in $defs) { . ([scriptblock]::Create($d.Extent.Text)) }
+        $tables = 'Version', 'jsonSchemaVersion', 'weights', 'areaNames', 'ruleCatalog', 'nis2Names', 'isoNames', 'complianceMap', 'planMeta', 'planStages',
+                  'sevLevel', 'mdiBase', 'mdiPages', 'mdiMap', 'checkLabels'
+        $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                       $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] }, $false) |
+            Where-Object { $_.Left.VariablePath.UserPath -in $tables } | ForEach-Object { . ([scriptblock]::Create($_.Extent.Text)) }
+        $ruleMeta = @{}
+        foreach ($r in $ruleCatalog) { $ruleMeta[$r.Id] = $r }
+
+        # Parametry i dane, które w skrypcie pochodzą z AD
+        $Klient = 'KLIENT'; $Silent = $true; $History = $false; $Previous = $null; $prev = $null; $UseWinRM = $false; $SkipDCChecks = $false
+        $MaxRows = 500; $MaxHistoryPoints = 24; $StaleDays = 90
+        $OutDir = Join-Path $TestDrive 'raporty'
+        $encOut = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8' }
+        $now = [datetime]'2026-01-15T10:00:00'
+        $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        $osLifecycleAsOf = '2026-11'; $patchRefDate = [datetime]'2026-10-13'
+        $domain = [pscustomobject]@{ DNSRoot = 'firma.local'; NetBIOSName = 'FIRMA'; DomainMode = 'Windows2012R2Domain'; DistinguishedName = 'DC=firma,DC=local'
+                                     PDCEmulator = 'dc1.firma.local'; RIDMaster = 'dc1.firma.local'; InfrastructureMaster = 'dc1.firma.local' }
+        $forest = [pscustomobject]@{ Name = 'firma.local'; RootDomain = 'firma.local'; ForestMode = 'Windows2012R2Forest'; SchemaMaster = 'dc1.firma.local'; DomainNamingMaster = 'dc1.firma.local' }
+        $pp = [pscustomobject]@{ MinPasswordLength = 8; ComplexityEnabled = $true; MaxPasswordAge = [timespan]::FromDays(90); PasswordHistoryCount = 24; LockoutThreshold = 5 }
+        $dcs = @([pscustomobject]@{ Name = 'DC1'; HostName = 'dc1.firma.local'; OperatingSystem = 'Windows Server 2022 Standard'; Site = 'Default-First-Site-Name'
+                                    IPv4Address = '10.0.0.10'; IsGlobalCatalog = $true; IsReadOnly = $false })
+        $trusts = @(); $invPriv = @()
+        $invOs = [System.Collections.Generic.List[object]]::new(); $invPatch = [System.Collections.Generic.List[object]]::new()
+        $dcCompliance = [ordered]@{}; $dcMethod = 'pominięte'
+        $ldapIdentity = 'FIRMA\audytor'; $runAsPriv = $false; $tokenFiltered = $false
+        $ruleNote = @{}
+        $checkKnown = [string[]]@(@($checkLabels.Keys | Where-Object { $_ -ne 'DC-GPO' }) + 'DC-PROBE')
+        $checkInclude = [string[]]@(); $checkExclude = [string[]]@(); $partialRun = $false
+
+        $findings = [System.Collections.Generic.List[object]]::new()
+        $fx = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'fixtures\znaleziska.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($f in $fx.Znaleziska) {
+            Add-Finding @{ Id = $f.Id; Category = $f.Category; Severity = $f.Severity; Title = $f.Title; Description = $f.Description
+                           Recommendation = $f.Recommendation; Fix = $f.Fix; Mitre = $f.Mitre; Objects = @($f.Objects) }
+        }
+
+        $src = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
+        $code = $src.Substring($src.IndexOf('#region ---------- wynik: dane'))
+        $out = @(. ([scriptblock]::Create($code)))
+        $res = $out | Where-Object { $_ -and $_.PSObject.Properties['Raport'] } | Select-Object -Last 1
+        $html = if ($res) { Get-Content -LiteralPath $res.Raport -Raw -Encoding UTF8 } else { '' }
+        $json = if ($res) { Get-Content -LiteralPath $res.Json -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
+    }
+    It 'tworzy pliki raportu i zwraca wynik (-Silent)' {
+        $res | Should -Not -BeNullOrEmpty
+        Test-Path -LiteralPath $res.Raport | Should -BeTrue
+        Test-Path -LiteralPath $res.Json | Should -BeTrue
+        Test-Path -LiteralPath $res.Csv | Should -BeTrue
+        $res.Klient | Should -Be 'KLIENT'
+        $res.KlasaEkspozycji | Should -Be 'E'
+        $res.Critical | Should -Be 1
+    }
+    It 'HTML: znaleziska, kodowanie znaków specjalnych, bez ukrytych kolumn' {
+        $html | Should -Match '<!DOCTYPE html>'
+        $html.Contains('id="D-GPP-PASSWORD"') | Should -BeTrue
+        $html.Contains('id="U-SIDHIST"') | Should -BeTrue
+        $html.Contains('&lt;script&gt;alert(1)&lt;/script&gt;') | Should -BeTrue
+        $html.Contains('<script>alert(1)') | Should -BeFalse
+        $html.Contains('&lt;b&gt;pogrubienie&lt;/b&gt;') | Should -BeTrue
+        $html.Contains('<th>_Id</th>') | Should -BeFalse
+        $html.Contains('S-1-5-21-1111111111') | Should -BeFalse
+        $html.Contains('j.kowalski') | Should -BeTrue
+    }
+    It 'JSON: wersja schematu, wynik, identyfikatory obiektów, statusy reguł' {
+        $json.SchemaVersion | Should -Be $jsonSchemaVersion
+        $json.Meta.Klient | Should -Be 'KLIENT'
+        $json.Meta.Wynik | Should -Be 25
+        $json.Meta.Czesciowy | Should -BeFalse
+        @($json.Znaleziska).Count | Should -Be 4
+        @($json.Znaleziska | Where-Object Id -eq 'U-SIDHIST')[0].Objects[0]._Id | Should -Be 'S-1-5-21-1111111111-2222222222-3333333333-1105'
+        @($json.Reguly | Where-Object Id -eq 'D-GPP-PASSWORD')[0].Status | Should -Be 'Znalezisko'
+        @($json.Reguly).Count | Should -Be $ruleCatalog.Count
+    }
+    It 'CSV obiektów bez ukrytych kolumn' {
+        $csv = Get-Content -LiteralPath ($res.Json -replace '\.json$', '_obiekty.csv') -Raw -Encoding UTF8
+        $csv.Contains('j.kowalski') | Should -BeTrue
+        $csv.Contains('_Id=') | Should -BeFalse
     }
 }

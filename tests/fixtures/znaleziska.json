@@ -1,0 +1,40 @@
+{
+  "Opis": "Dane przykładowe do testu warstwy raportu (HTML, JSON, CSV). Nazwy fikcyjne: KLIENT, firma.local.",
+  "Znaleziska": [
+    {
+      "Id": "D-GPP-PASSWORD", "Category": "Domena i las", "Severity": "Critical",
+      "Title": "Hasła zapisane w zasadach grupy (SYSVOL) (1)",
+      "Description": "Opis ryzyka ze znakami specjalnymi: <b>pogrubienie</b> & \"cudzysłów\" oraz polskie litery ąęśćżźńół.",
+      "Recommendation": "Zmienić hasła i usunąć wpisy z GPO.",
+      "Fix": "findstr /S /I /M \"cpassword\" \\\\firma.local\\SYSVOL\\firma.local\\Policies\\*.xml",
+      "Mitre": "T1552.006",
+      "Objects": [
+        { "GPO": "Stacje <script>alert(1)</script>", "Czesc": "Machine", "Plik": "Groups.xml", "Element": "Administrator", "Konto": "Administrator", "Typ": "cpassword" }
+      ]
+    },
+    {
+      "Id": "U-SIDHIST", "Category": "Konta użytkowników", "Severity": "Medium",
+      "Title": "Konta z SIDHistory (2)",
+      "Description": "Konta z historią SID.",
+      "Recommendation": "Usunąć SIDHistory po migracji.",
+      "Fix": "Get-ADUser -Filter * -Properties SIDHistory",
+      "Mitre": "T1134.005",
+      "Objects": [
+        { "Konto": "j.kowalski", "Nazwa": "Jan Kowalski", "Aktywne": true, "Kontener": "OU=Biuro,DC=firma,DC=local", "_Id": "S-1-5-21-1111111111-2222222222-3333333333-1105" },
+        { "Konto": "a.nowak", "Nazwa": "Anna Nowak", "Aktywne": true, "Kontener": "OU=Biuro,DC=firma,DC=local", "_Id": "S-1-5-21-1111111111-2222222222-3333333333-1106" }
+      ]
+    },
+    {
+      "Id": "D-DFL", "Category": "Domena i las", "Severity": "Low",
+      "Title": "Poziom funkcjonalny domeny: Windows2012R2Domain",
+      "Description": "Niższy poziom funkcjonalny blokuje część mechanizmów ochrony.",
+      "Recommendation": "Podnieść poziom funkcjonalny.",
+      "Fix": "", "Mitre": "", "Objects": []
+    },
+    {
+      "Id": "INFO-TEST", "Category": "Informacje", "Severity": "Info",
+      "Title": "Znalezisko informacyjne",
+      "Description": "Nie wpływa na wynik.", "Recommendation": "", "Fix": "", "Mitre": "", "Objects": []
+    }
+  ]
+}

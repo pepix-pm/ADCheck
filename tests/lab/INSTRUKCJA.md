@@ -56,6 +56,7 @@ Kolejność kroków:
 6. Przebieg F – przygotowanie i polecenie w sekcji „Przebieg F” poniżej.
 7. Przebieg G – przed `-Usun` z punktu F10; polecenie i sprawdzenia w sekcji „Przebieg G”.
 8. Przebieg H – pierwszeństwo GPO (wersja 0.31); kroki w sekcji „Przebieg H”.
+9. Przebieg I – nowe reguły i opcje wersji 0.31; kroki w sekcji „Przebieg I”.
 
 Bez stacji Windows 11 przebieg B można wykonać z dowolnego komputera z Windows w tej samej sieci:
 `runas /netonly /user:LAB\lab-zwykly powershell`, a w nowym oknie dopisać do polecenia `-Server lab.local`.
@@ -218,6 +219,26 @@ Przygotowanie: GPO `Lab-H-Domena` podlinkowane do domeny z LmCompatibilityLevel 
 | H6 | GPO z wyłączeniem LLMNR podlinkowane do domeny + filtr WMI na tym GPO | Sprawdzone reguły: D-GPO-LLMNR „Zaliczony warunkowo (GPO domeny z ustawieniem ma ograniczony zakres…)” |
 | H7 | H6 bez filtra WMI; OU z aktywnym komputerem ma Block Inheritance | D-GPO-LLMNR „Zaliczony warunkowo (OU z komputerami blokujące dziedziczenie…)”; po ustawieniu Enforced na łączu – „Zaliczony” |
 | H8 | `-History -MaxHistoryPoints 3` przy co najmniej 4 raportach LAB w katalogu | Wykres i tabela mają 3 przeglądy (2 najnowsze + bieżący) i notkę o pominiętych starszych |
+
+### Przebieg I (wersja 0.31: nowe reguły, wybór testów, porównanie obiektów)
+
+| Nr | Przygotowanie | Oczekiwany wynik |
+|---|---|---|
+| I1 | GPO `Lab-I-Admini` podlinkowane do OU ze stacją: Restricted Groups – grupa `lab-helpdesk` jako członek Administrators | D-GPO-LOCALADMIN (Low): wiersz z GPO `Lab-I-Admini`, Podmiot `LAB\lab-helpdesk`, ObejmujeDC „Nie” |
+| I2 | to samo GPO podlinkowane dodatkowo do domeny | waga High, ObejmujeDC „Tak” |
+| I3 | w preferencjach GPO (Local Users and Groups) dodane Domain Users do Administrators (built-in) | waga Critical, wiersz ze źródłem „Preferencje (Groups.xml)”, SzerokaGrupa „Tak” |
+| I4 | wpis z kontem lokalnym (np. `Administrator`) i z grupą Domain Admins | **brak** wierszy dla tych wpisów |
+| I5 | PDC jako maszyna wirtualna Hyper-V z włączoną synchronizacją czasu z hostem (domyślnie) | DC-TIME-SOURCE (Medium) „czas z hosta wirtualizacji”; na PDC `w32tm /query /source` pokazuje „VM IC Time Synchronization Provider” |
+| I6 | na PDC: `VMICTimeProvider\Enabled = 0`, zewnętrzny NTP, `w32tm /resync` | DC-TIME-SOURCE: „Zaliczony”; gdy PDC nie ma dostępu do NTP – znalezisko „zegar lokalny” albo „niezsynchronizowany” (zapisz, które) |
+| I7 | `-UseWinRM`; na jednym DC `StrongCertificateBindingEnforcement = 1` | D-ADCS-ESC10 (Medium) z tym DC; opis D-ADCS-ESC9 wymienia ten DC |
+| I8 | I7 + `CertificateMappingMethods = 0x1F` na tym DC | D-ADCS-ESC10 (High), Uwagi „Schannel mapuje certyfikat na konto po UPN” |
+| I9 | wartości z I7–I8 usunięte | D-ADCS-ESC10 „Zaliczony”; D-ADCS-ESC9 (jeśli występuje) ma wagę Low; bez `-UseWinRM`: D-ADCS-ESC10 „Wymaga -UseWinRM” |
+| I10 | `-IncludeCheck ADCS,D-GPP-PASSWORD` | konsola: pozostałe testy „pominięty”; raport z notką „Przegląd częściowy”; w „Sprawdzone reguły” pozostałe mają „Pominięty (-IncludeCheck / -ExcludeCheck)” |
+| I11 | `-ExcludeCheck DC-PROBE,CIS` | sondy DC i CIS pominięte, reszta jak w pełnym przebiegu |
+| I12 | `-IncludeCheck NIEMA` | błąd na starcie z listą dostępnych testów, bez przebiegu |
+| I13 | `-History` po I10 | przegląd częściowy z I10 nie występuje w tabeli historii |
+| I14 | pełny przebieg, potem zmiana nazwy logowania konta z listy U-PNE (lub innego znaleziska kont) i dodanie drugiego takiego konta, potem przebieg z `-Previous` | „Zmiany obiektów…”: Nowe 1 (tylko dodane konto), Usunięte 0 – konto o zmienionej nazwie nie jest liczone |
+| I15 | `-Previous` wskazujący raport z wersji 0.30 | tabela zmian obiektów z notką o porównaniu po nazwie |
 
 ## 4. Co przekazać
 

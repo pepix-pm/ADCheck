@@ -2,12 +2,14 @@
 raporty/
 *.html
 *.json
+!tests/fixtures/*.json
 *.csv
 
 # Systemowe / edytory
 .vscode/
 *.log
 Thumbs.db
+.DS_Store
 
 # Lokalne instrukcje dla asystenta - poza repo
 CLAUDE.md

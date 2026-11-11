@@ -34,11 +34,12 @@ clear
 | `-Server` | Domena lub DC do odpytania (domyślnie domena bieżącego użytkownika) |
 | `-OutDir` | Katalog wyników (domyślnie `.\raporty` obok skryptu; przy uruchomieniu z GitHuba `%USERPROFILE%\ADCheck\raporty`) |
 | `-StaleDays` | Próg nieaktywności kont w dniach (domyślnie 90) |
-| `-Previous` | JSON z poprzedniego przeglądu do porównania |
+| `-Previous` | JSON z poprzedniego przeglądu do porównania: nowe i usunięte znaleziska oraz – dla znalezisk obecnych w obu przeglądach – obiekty, które doszły i zniknęły (konta i komputery po SID, od v0.31) |
 | `-History` | Sekcja „Historia przeglądów”: wykres wyników i zgodności DC z raportów JSON tego klienta i domeny w katalogu `-OutDir` – najnowsze, do limitu `-MaxHistoryPoints` (od v0.30) |
 | `-UseWinRM` | Testy DC na podstawie rzeczywistej konfiguracji (rejestr, `auditpol`, dziennik Security) odczytanej przez WinRM; wymaga członkostwa w grupie Administrators domeny |
 | `-SkipDCChecks` | Pomija testy kontrolerów domeny |
 | `-MaxHistoryPoints` | Największa liczba przeglądów w sekcji „Historia przeglądów” – najnowsze, razem z bieżącym (domyślnie 24; od v0.31) |
+| `-IncludeCheck`, `-ExcludeCheck` | Tylko wskazane testy albo wszystkie poza wskazanymi – np. szybki ponowny test po naprawie. Nazwa testu (`ADCS`, `PRIV`, `DC-PROBE`, …; pełną listę podaje komunikat błędu przy nieznanej nazwie) lub Id reguły (`D-ADCS-ESC1` uruchamia cały test `ADCS`). Przegląd częściowy jest oznaczony w raporcie, nie trafia do historii, a jego wyniku nie należy porównywać z pełnym (od v0.31) |
 | `-MaxRows` | Maksymalna liczba obiektów na znalezisko w HTML (domyślnie 500; pełna lista w CSV) |
 | `-Silent` | Bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików (do automatyzacji) |
 
@@ -154,6 +155,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-ADCS-ESC11 | High | CA bez wymogu szyfrowania żądań RPC (brak IF_ENFORCEENCRYPTICERTREQUEST) – NTLM relay do CA | T1557 |
 | D-ADCS-ESC8 | High | Rejestracja przez WWW (`http://<CA>/certsrv/`) przyjmuje NTLM po HTTP – NTLM relay do CA (sonda HTTP bez poświadczeń; przy braku łączności status „Nierozstrzygnięty”) | T1557 |
 | D-ADCS-ESC9 | Medium / Low | Szablon z flagą CT_FLAG_NO_SECURITY_EXTENSION i EKU do logowania | T1649 |
+| D-ADCS-ESC10 | High / Medium | Tylko `-UseWinRM`: rejestr DC dopuszcza słabe wiązanie certyfikatu z kontem – mapowanie po UPN w Schannel (`CertificateMappingMethods` z bitem 0x4, High) lub `StrongCertificateBindingEnforcement` 0/1 (Medium). Przy pełnym wymuszaniu na wszystkich DC waga D-ADCS-ESC9 spada do Low | T1649 |
 | C-RBCD | Critical / Medium / Low | RBCD na kontach poza DC: Critical na kontach z grup uprzywilejowanych, Medium gdy podmiotem jest konto komputera utworzone przez zwykłe konto (MachineAccountQuota), w pozostałych przypadkach Low (do weryfikacji) | T1558 |
 | P-KRBTGT | High / Critical | Wiek hasła krbtgt (> 180 / > 365 dni) | T1558.001 |
 | P-PNE | High | Konta uprzywilejowane z hasłem bez wygasania | T1078.002 |
@@ -226,6 +228,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-SPN-DUP | Low | Ta sama nazwa SPN na kilku kontach w domenie | T1558.003 |
 | D-UPN-DUP | Low | Ta sama nazwa UPN na kilku kontach w domenie | – |
 | D-GPP-PASSWORD | Critical / High | Hasła w preferencjach GPO w SYSVOL: `cpassword` (Critical, odszyfrowywalne przez każdego) lub hasło autologowania jawnym tekstem (High); wszystkie GPO, także niepodlinkowane; raport nie zawiera haseł | T1552.006 |
+| D-GPO-LOCALADMIN | Critical / High / Low | Konta i grupy domenowe spoza administratorów dodawane do lokalnej grupy Administrators przez GPO z aktywnym łączem („Grupy z ograniczeniami” w GptTmpl.inf, preferencje Groups.xml): szeroka grupa, np. Domain Users (Critical), GPO podlinkowane do domeny lub OU Domain Controllers (High), pozostałe (Low). Konta lokalne są pomijane | T1078.002 |
 | DC-OS-EOL | High | DC z systemem bez wsparcia | T1210 |
 | DC-SPOOLER | High | Print Spooler na DC | T1187 |
 | DC-SMB1 | High | SMBv1 na DC | T1210 |
@@ -250,6 +253,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-SYSVOL-FRS | High | SYSVOL replikowany przez FRS | – |
 | DC-SYSVOL-SHARE | High | DC bez udziału SYSVOL/NETLOGON | – |
 | DC-TIME | High / Medium | Czas DC różni się od PDC o > 5 min / > 1 min | – |
+| DC-TIME-SOURCE | Medium | PDC Emulator bierze czas z hosta wirtualizacji (dostawca czasu Hyper-V), z zegara lokalnego albo zgłasza brak synchronizacji – z odpowiedzi NTP (UDP 123), z `-UseWinRM` także z `w32tm /query /source` | – |
 | D-SINGLEDC | Medium | Tylko jeden kontroler domeny | – |
 | DC-MACHINEPWD | Medium | Hasło konta komputera DC starsze niż 45 dni | – |
 | DC-PORTS | Medium | Niedostępne porty usług AD na DC (53, 88, 135, 389, 445, 9389, 3268) | – |
@@ -294,11 +298,11 @@ Wersja i data końca wsparcia ustalane są z atrybutów `operatingSystem` i `ope
 Invoke-Pester .\tests
 ```
 
-Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezależnych od AD i ich nie uruchamiają. Przy każdym pushu i pull requeście GitHub Actions (`.github/workflows/ci.yml`, Windows) uruchamia PSScriptAnalyzer (Warning, Error; wyłączone reguły z uzasadnieniem w `PSScriptAnalyzerSettings.psd1`), testy Pester oraz sprawdza kodowanie UTF-8 z BOM plików `*.ps1`.
+Testy (Pester 5) ładują z pliku skryptu definicje funkcji niezależnych od AD, bez uruchamiania skryptu. Warstwa raportu (HTML, JSON, CSV) jest sprawdzana na fikcyjnych danych z `tests/fixtures/znaleziska.json`. Przy każdym pushu i pull requeście GitHub Actions (`.github/workflows/ci.yml`, Windows) uruchamia PSScriptAnalyzer (Warning, Error; wyłączone reguły z uzasadnieniem w `PSScriptAnalyzerSettings.psd1`), testy Pester oraz sprawdza kodowanie UTF-8 z BOM plików `*.ps1`.
 
 ## Ograniczenia
 
-Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje stacji końcowych. Z usług certyfikatów (AD CS) ocenia konfigurację zapisaną w AD (ESC1–5, 9, 13), ustawienia i uprawnienia CA przez jego interfejs administracyjny (ESC6, 7, 11 – wymaga łączności RPC z serwerem CA) i sondą HTTP rejestrację przez WWW (ESC8); nie ocenia rejestru DC (ESC10) ani HTTPS z EPA. Gdy serwer CA jest nieosiągalny, reguły mają status „Nierozstrzygnięty”, a przyczyna trafia do znaleziska INFO-ADCS-UNVERIFIED. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder, GPO podpiętych do domeny i OU Domain Controllers oraz na obiektach Tier 0 (konta i grupy uprzywilejowane, konta DC, OU Domain Controllers) – nie na pozostałych kontach, OU i serwerach. Ocena GPO nie uwzględnia flagi Enforced, blokowania dziedziczenia, filtrowania zabezpieczeń ani filtrów WMI. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe: przed wykonaniem sprawdź ich skutki w środowisku testowym i wprowadzaj je zgodnie z zasadami zarządzania zmianami w organizacji.
+Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje stacji końcowych. Z usług certyfikatów (AD CS) ocenia konfigurację zapisaną w AD (ESC1–5, 9, 13), ustawienia i uprawnienia CA przez jego interfejs administracyjny (ESC6, 7, 11 – wymaga łączności RPC z serwerem CA) i sondą HTTP rejestrację przez WWW (ESC8); rejestr DC (ESC10) ocenia tylko z `-UseWinRM`; nie ocenia HTTPS z EPA. Gdy serwer CA jest nieosiągalny, reguły mają status „Nierozstrzygnięty”, a przyczyna trafia do znaleziska INFO-ADCS-UNVERIFIED. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder, GPO podpiętych do domeny i OU Domain Controllers oraz na obiektach Tier 0 (konta i grupy uprzywilejowane, konta DC, OU Domain Controllers) – nie na pozostałych kontach, OU i serwerach. Ocena GPO kontrolerów domeny uwzględnia łącza wymuszone, blokowanie dziedziczenia i filtrowanie zabezpieczeń (od v0.31); nie ocenia treści filtrów WMI (takie GPO są oznaczane jako niepewne), GPO podlinkowanych do lokacji ani tego, które GPO faktycznie obejmują dany komputer poza DC. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe: przed wykonaniem sprawdź ich skutki w środowisku testowym i wprowadzaj je zgodnie z zasadami zarządzania zmianami w organizacji.
 
 ## Zgoda na badanie i ślad w środowisku
 
@@ -308,7 +312,7 @@ Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie je
 
 - zapytania LDAP o wszystkie konta, grupy, komputery, GPO, ACL i konfigurację lasu,
 - odczyt SYSVOL po SMB (GPO, Registry.pol, GptTmpl.inf),
-- sondy kontrolerów domeny: dostępność portów usług AD, potok `\\DC\pipe\spoolss`, wyliczanie sesji SMB (NetSessionEnum), **próbę anonimowego zapytania LDAP**,
+- sondy kontrolerów domeny: dostępność portów usług AD, zapytania NTP (UDP 123), potok `\\DC\pipe\spoolss`, wyliczanie sesji SMB (NetSessionEnum), **próbę anonimowego zapytania LDAP**,
 - zapytanie HTTP bez poświadczeń do `http://<serwer CA>/certsrv/` i odczyt konfiguracji CA przez RPC/DCOM (interfejs administracyjny CA, tylko odczyt) – jeśli w lesie jest AD CS,
 - odczyt dziennika zdarzeń DC (bilety Kerberos z DES/RC4), jeśli konto ma do niego dostęp,
 - w trybie `-UseWinRM`: zdalne sesje PowerShell na każdym DC (odczyt rejestru, stanu usług, zasad audytu i dziennika Security).
