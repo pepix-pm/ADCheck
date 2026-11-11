@@ -1313,7 +1313,17 @@ function Get-DcGpoConfidence {
 $gpoDcNotes  = [ordered]@{}   # ustalenia: blokowanie dziedziczenia, GPO pominięte przez filtrowanie zabezpieczeń (bez wpływu na pewność)
 $gpoDcUnsure = [ordered]@{}   # niepewność: filtr WMI, filtrowanie obejmujące część DC lub nieustalone, uprawnienia nieodczytane
 $gpoDcCache = @{}
-# GPO obejmujące DC w kolejności stosowania (późniejszy wygrywa): displayName, gPCFileSysPath, Zrodlo; błędy trafiają do $gpoReadErrors
+# GPO stosowane na podanym DC (bez parametru: wszystkie GPO obejmujące którykolwiek DC), w kolejności stosowania
+function Get-DcGpoFor([string]$DcHost) {
+    @(Get-DcLinkedGpo | Where-Object { -not $DcHost -or -not $_.Dcs -or @($_.Dcs) -contains $DcHost })
+}
+# Grupy DC z tym samym zestawem GPO: DC (etykieta do kolumny DC), Host (reprezentant). Jedna grupa = 'wszystkie DC (GPO)'.
+function Get-DcGpoProfiles {
+    $groups = @($dcs | Group-Object { (@(Get-DcGpoFor "$($_.HostName)" | ForEach-Object { $_.displayName }) -join '|') })
+    if ($groups.Count -le 1) { return [pscustomobject]@{ DC = 'wszystkie DC (GPO)'; Host = '' } }
+    @($groups | ForEach-Object { [pscustomobject]@{ DC = "$((@($_.Group | ForEach-Object { $_.HostName }) | Sort-Object) -join ', ') (GPO)"; Host = "$($_.Group[0].HostName)" } })
+}
+# GPO obejmujące DC w kolejności stosowania (późniejszy wygrywa): displayName, gPCFileSysPath, Dcs ($null = wszystkie DC), Zrodlo; błędy trafiają do $gpoReadErrors
 function Get-DcLinkedGpo {
     if ($gpoDcCache.ContainsKey('list')) { return $gpoDcCache['list'] }
     # Wszystkie GPO jednym wyszukiwaniem: GPO bez prawa odczytu po prostu nie wraca (bezpośrednie wiązanie z takim obiektem daje 0x8007200A)
@@ -1357,34 +1367,44 @@ function Get-DcLinkedGpo {
         if ([int]$gpo.flags -band 2) { continue }
         $name = "$($gpo.displayName)"; $place = & $where $l.Container
         $unsure = [System.Collections.Generic.List[string]]::new()
+        $dcsOnly = $null   # $null = wszystkie DC
+
         if ("$($gpo.gpcwqlfilter)".Trim()) { $unsure.Add('filtr WMI') }
         if ($gpo.ntsecuritydescriptor -is [System.DirectoryServices.ActiveDirectorySecurity]) {
             $f = Get-GpoApplySids $gpo.ntsecuritydescriptor
-            $res = Test-GpoSecurityFilter $f.Allow $f.Deny $tokens.ToArray()
-            if ($res -eq 'Nie') {
+            # Zakres ustalany dla każdego DC osobno: GPO obejmujące tylko część DC jest oceniane tylko dla tych DC
+            $cov = [System.Collections.Generic.List[string]]::new(); $unk = $false
+            for ($i = 0; $i -lt $dcs.Count; $i++) {
+                $r1 = Test-GpoSecurityFilter $f.Allow $f.Deny @(, $tokens[$i])
+                if ($r1 -eq 'Tak') { $cov.Add("$($dcs[$i].HostName)") } elseif ($r1 -eq '?') { $unk = $true }
+            }
+            if ($unk) { $unsure.Add('filtrowanie zabezpieczeń nieustalone') }
+            elseif (-not $cov.Count) {
                 $gpoDcNotes[$name] = "GPO '$name' (podlinkowane do $place) pominięto - filtrowanie zabezpieczeń nie obejmuje kontrolerów domeny"
                 continue
+            } elseif ($cov.Count -lt $dcs.Count) {
+                $dcsOnly = $cov.ToArray()
+                $gpoDcNotes[$name] = "GPO '$name' (podlinkowane do $place) dotyczy tylko DC: $(($dcsOnly | ForEach-Object { ($_ -split '\.')[0] }) -join ', ') - ustawienia oceniono osobno dla tych DC"
             }
-            if ($res -eq 'Czesc') { $unsure.Add('filtrowanie zabezpieczeń obejmuje tylko część DC') }
-            elseif ($res -eq '?') { $unsure.Add('filtrowanie zabezpieczeń nieustalone') }
         } else { $unsure.Add('uprawnienia GPO nieodczytane') }
         if ($unsure.Count) { $gpoDcUnsure[$name] = "GPO '$name' (podlinkowane do $place): $($unsure -join ', ') - nie da się potwierdzić, że jego ustawienia obejmują wszystkie DC" }
         if ($gpo.gPCFileSysPath -and -not (Test-Path -LiteralPath $gpo.gPCFileSysPath)) { $gpoNoFiles[$name] = $place }
-        $tag = @($(if ($l.Enforced) { 'wymuszone' }), $(if ($unsure.Count) { "niepewne: $($unsure -join ', ')" })) | Where-Object { $_ }
-        $list.Add([pscustomobject]@{ displayName = $name; gPCFileSysPath = $gpo.gPCFileSysPath; Zrodlo = "GPO: $name$(if ($tag) { " ($($tag -join '; '))" })" })
+        $tag = @($(if ($l.Enforced) { 'wymuszone' }), $(if ($dcsOnly) { "tylko: $(($dcsOnly | ForEach-Object { ($_ -split '\.')[0] }) -join ', ')" }),
+                 $(if ($unsure.Count) { "niepewne: $($unsure -join ', ')" })) | Where-Object { $_ }
+        $list.Add([pscustomobject]@{ displayName = $name; gPCFileSysPath = $gpo.gPCFileSysPath; Dcs = $dcsOnly; Zrodlo = "GPO: $name$(if ($tag) { " ($($tag -join '; '))" })" })
     }
     $gpoDcCache['list'] = $list.ToArray()
     $gpoDcCache['list']
 }
 
-function Get-DcGpoSettings {
+function Get-DcGpoSettings([string]$DcHost) {
     $keys = @{
         LDAPServerIntegrity       = 'MACHINE\System\CurrentControlSet\Services\NTDS\Parameters\LDAPServerIntegrity'
         LdapEnforceChannelBinding = 'MACHINE\System\CurrentControlSet\Services\NTDS\Parameters\LdapEnforceChannelBinding'
         LmCompatibilityLevel      = 'MACHINE\System\CurrentControlSet\Control\Lsa\LmCompatibilityLevel'
     }
     $result = @{}
-    foreach ($gpo in @(Get-DcLinkedGpo)) {
+    foreach ($gpo in @(Get-DcGpoFor $DcHost)) {
             $inf = Join-Path $gpo.gPCFileSysPath 'Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
             if (-not (Test-Path -LiteralPath $inf)) { continue }
             $content = $null
@@ -1471,9 +1491,9 @@ function Resolve-SidName([string]$Sid) {
 
 # Zbiorcza konfiguracja z GPO obejmujących DC (kolejność, pierwszeństwo i filtry: Get-DcLinkedGpo).
 # Registry: 'ścieżka\wartość' (małe litery, bez HKLM) -> {Wartosc, Zrodlo}; Rights: SeXxx -> {Wartosc = SID-y, Zrodlo}; Audit: GUID podkategorii -> {Wartosc 0-3, Zrodlo}
-function Get-DcGpoPolicy {
+function Get-DcGpoPolicy([string]$DcHost) {
     $pol = [pscustomobject]@{ Registry = @{}; Rights = @{}; Audit = @{} }
-    foreach ($gpo in @(Get-DcLinkedGpo)) {
+    foreach ($gpo in @(Get-DcGpoFor $DcHost)) {
         try {
             $src  = $gpo.Zrodlo
             $root = Join-Path $gpo.gPCFileSysPath 'Machine'
@@ -4017,7 +4037,7 @@ if (-not $SkipDCChecks) {
     $dcMethod = if ($UseWinRM) { $dcMethodWinRM } else { $dcMethodGpo }
     $gpoSettings = @{}
     # Uzupełniamy istniejącą tabelę zamiast $script: - działa także przy uruchomieniu jako scriptblock
-    if (-not $UseWinRM) { Invoke-Check 'DC-GPO' { $g = Get-DcGpoSettings; foreach ($k in $g.Keys) { $gpoSettings[$k] = $g[$k] } } }
+    if (-not $UseWinRM) { Invoke-Check 'DC-GPO' { foreach ($d in $dcs) { $gpoSettings["$($d.HostName)"] = Get-DcGpoSettings "$($d.HostName)" } } }
 
     $dcSpool = [System.Collections.Generic.List[object]]::new()
     $dcSmb1  = [System.Collections.Generic.List[object]]::new()
@@ -4072,7 +4092,8 @@ public static class PepixNetApi {
             } else {
                 $smb = Test-Smb1 -Computer $h
                 $spl = if ($smb -eq '?') { '?' } else { Test-RemotePipe -Computer $h -Pipe 'spoolss' }
-                $gL = $gpoSettings['LDAPServerIntegrity']; $gC = $gpoSettings['LdapEnforceChannelBinding']; $gN = $gpoSettings['LmCompatibilityLevel']
+                $gS = $gpoSettings[$h]; if (-not $gS) { $gS = @{} }
+                $gL = $gS['LDAPServerIntegrity']; $gC = $gS['LdapEnforceChannelBinding']; $gN = $gS['LmCompatibilityLevel']
                 $noGpo = 'brak w GPO (wartość domyślna systemu)'
                 $st = [pscustomobject]@{
                     Spooler = $spl; SpoolerSrc = 'test potoku \\DC\pipe\spoolss'
@@ -4520,7 +4541,8 @@ if (-not $SkipDCChecks) {
     $cisRows  = [System.Collections.Generic.List[object]]::new()
 
     Invoke-Check 'CIS' {
-        $gpo = Get-DcGpoPolicy
+        # Profile GPO: DC z tym samym zestawem GPO oceniane razem; zwykle jeden profil ('wszystkie DC (GPO)')
+        $gpoTargets = @(Get-DcGpoProfiles | ForEach-Object { [pscustomobject]@{ DC = $_.DC; Tryb = 'GPO'; Reg = $null; Audit = $null; Policy = (Get-DcGpoPolicy $_.Host) } })
 
         # Cele oceny: przy -UseWinRM każdy DC osobno (rejestr + auditpol), inaczej jeden zestaw z GPO dla wszystkich DC
         $targets = [System.Collections.Generic.List[object]]::new()
@@ -4538,13 +4560,13 @@ if (-not $SkipDCChecks) {
                         }
                         [pscustomobject]@{ Reg = $reg; Audit = @(auditpol.exe /get /category:* /r) }
                     }
-                    $targets.Add([pscustomobject]@{ DC = $dc.HostName; Tryb = 'WinRM'; Reg = $r.Reg; Audit = @(ConvertFrom-AuditpolCsv @($r.Audit)) })
+                    $targets.Add([pscustomobject]@{ DC = $dc.HostName; Tryb = 'WinRM'; Reg = $r.Reg; Audit = @(ConvertFrom-AuditpolCsv @($r.Audit)); Policy = $null })
                 } catch {
-                    $targets.Add([pscustomobject]@{ DC = "$($dc.HostName) (GPO - WinRM niedostępny)"; Tryb = 'GPO'; Reg = $null; Audit = $null })
+                    $targets.Add([pscustomobject]@{ DC = "$($dc.HostName) (GPO - WinRM niedostępny)"; Tryb = 'GPO'; Reg = $null; Audit = $null; Policy = (Get-DcGpoPolicy "$($dc.HostName)") })
                 }
             }
         } else {
-            $targets.Add([pscustomobject]@{ DC = 'wszystkie DC (GPO)'; Tryb = 'GPO'; Reg = $null; Audit = $null })
+            foreach ($gt in $gpoTargets) { $targets.Add($gt) }
         }
 
         foreach ($t in $targets) {
@@ -4553,7 +4575,7 @@ if (-not $SkipDCChecks) {
                     $val = $t.Reg["$($c.P)|$($c.V)"]
                     $src = if ($null -ne $val) { 'rejestr DC (WinRM)' } else { 'nieustawione - wartość domyślna systemu' }
                 } else {
-                    $g = $gpo.Registry["$($c.P)\$($c.V)".ToLower()]
+                    $g = $t.Policy.Registry["$($c.P)\$($c.V)".ToLower()]
                     $val = if ($g) { $g.Wartosc } else { $null }
                     $src = if ($g) { $g.Zrodlo } else { 'brak w GPO - wartość domyślna systemu' }
                 }
@@ -4571,7 +4593,7 @@ if (-not $SkipDCChecks) {
                     $val = $t.Reg["$($c.P)|$($c.V)"]
                     $src = if ($null -ne $val) { 'rejestr DC (WinRM)' } else { 'nieustawione - wartość domyślna systemu' }
                 } else {
-                    $g = $gpo.Registry["$($c.P)\$($c.V)".ToLower()]
+                    $g = $t.Policy.Registry["$($c.P)\$($c.V)".ToLower()]
                     $val = if ($g) { $g.Wartosc } else { $null }
                     $src = if ($g) { $g.Zrodlo } else { 'brak w GPO - wartość domyślna systemu' }
                 }
@@ -4591,9 +4613,9 @@ if (-not $SkipDCChecks) {
                     $val = if ($line) { ConvertFrom-AuditText $line.S } else { $null }
                     $src = if (@($t.Audit).Count) { 'auditpol (WinRM)' } else { 'auditpol (WinRM) - nie odczytano podkategorii; sprawdź auditpol /get /category:* /r na DC' }
                 } else {
-                    $g = $gpo.Audit[$guid]
+                    $g = $t.Policy.Audit[$guid]
                     $val = if ($g) { $g.Wartosc } else { $null }
-                    $src = if ($g) { $g.Zrodlo } elseif ($gpo.Audit.Count) { 'brak w GPO' } else { 'brak zaawansowanych zasad audytu w GPO' }
+                    $src = if ($g) { $g.Zrodlo } elseif ($t.Policy.Audit.Count) { 'brak w GPO' } else { 'brak zaawansowanych zasad audytu w GPO' }
                 }
                 $row = [pscustomobject]@{
                     Ustawienie = $a.N; DC = $t.DC; Obszar = 'Zasady audytu'
@@ -4606,8 +4628,10 @@ if (-not $SkipDCChecks) {
             }
         }
 
+        # Przypisania praw zawsze z GPO (także przy -UseWinRM) - osobno dla każdego profilu GPO
+        foreach ($pt in $gpoTargets) {
         foreach ($c in $cisRights) {
-            $g = $gpo.Rights[$c.R]
+            $g = $pt.Policy.Rights[$c.R]
             $exp = if ($c.ContainsKey('Allowed')) { if ($c.Allowed.Count) { 'tylko: ' + (($c.Allowed | ForEach-Object { Resolve-SidName $_ }) -join ', ') } else { 'nikt' } }
                    elseif ($c.ContainsKey('Forbidden')) { 'bez: ' + (($c.Forbidden | ForEach-Object { Resolve-SidName $_ }) -join ', ') }
                    else { 'zawiera: ' + (($c.Required | ForEach-Object { Resolve-SidName $_ }) -join ', ') }
@@ -4627,11 +4651,12 @@ if (-not $SkipDCChecks) {
                 $src = $g.Zrodlo
             }
             $row = [pscustomobject]@{
-                Ustawienie = "$($c.N) ($($c.R))"; DC = 'wszystkie DC (GPO)'; Obszar = 'Przypisanie praw użytkowników'
+                Ustawienie = "$($c.N) ($($c.R))"; DC = $pt.DC; Obszar = 'Przypisanie praw użytkowników'
                 Oczekiwane = $exp; Aktualne = $cur; Zrodlo = $src; Waga = $c.S; Zgodne = $ok
                 Microsoft = '— (nie porównywano)'; ZgodneMS = '—'
             }
             $cisRows.Add($row)
+        }
         }
 
         $fail  = @($cisRows | Where-Object Zgodne -eq 'Nie')
