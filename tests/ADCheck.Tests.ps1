@@ -4,11 +4,11 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
-    $vars = 'aclGuid', 'win11Builds', 'win10Ltsc', 'serverEol', 'serverBuilds', 'sacBuilds', 'legacyClient'
+    $vars = 'dcMethodWinRM', 'dcMethodGpo', 'aclGuid', 'win11Builds', 'win10Ltsc', 'serverEol', 'serverBuilds', 'sacBuilds', 'legacyClient'
     $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
                    $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] }, $false) |
         Where-Object { $_.Left.VariablePath.UserPath -in $vars } | ForEach-Object { . ([scriptblock]::Create($_.Extent.Text)) }
@@ -81,6 +81,39 @@ Describe 'ConvertFrom-AuditText' {
         ConvertFrom-AuditText 'Success' | Should -Be 1
         ConvertFrom-AuditText 'Failure' | Should -Be 2
         ConvertFrom-AuditText 'No Auditing' | Should -Be 0
+    }
+    It 'rozpoznaje ustawienia po polsku' {
+        ConvertFrom-AuditText 'Sukces i niepowodzenie' | Should -Be 3
+        ConvertFrom-AuditText 'Sukces' | Should -Be 1
+        ConvertFrom-AuditText 'Niepowodzenie' | Should -Be 2
+        ConvertFrom-AuditText 'Brak inspekcji' | Should -Be 0
+    }
+}
+
+Describe 'ConvertFrom-AuditpolCsv' {
+    It 'czyta kolumny po pozycji niezależnie od języka nagłówków' {
+        # Nagłówek przykładowy - kolumny po pozycji, więc jego treść nie ma znaczenia
+        $lines = @(
+            'Nazwa komputera,Cel zasad,Podsystem,Podkategoria,Identyfikator GUID podkategorii,Ustawienie dołączenia,Ustawienie wykluczenia'
+            ''
+            'DC01,System,,Weryfikacja poświadczeń,{0CCE923F-69AE-11D9-BED3-505054503030},Sukces i niepowodzenie,'
+            'DC01,System,,Logowanie,{0CCE9215-69AE-11D9-BED3-505054503030},Sukces,'
+        )
+        $r = @(ConvertFrom-AuditpolCsv $lines)
+        $r.Count | Should -Be 2
+        $r[0].G | Should -Be '0cce923f-69ae-11d9-bed3-505054503030'
+        $r[0].S | Should -Be 'Sukces i niepowodzenie'
+        ConvertFrom-AuditText $r[1].S | Should -Be 1
+    }
+    It 'pomija wiersze bez GUID i pusty wynik' {
+        @(ConvertFrom-AuditpolCsv @('Machine Name,Policy Target,Subsystem,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting', 'DC01,System,,X,,Success,')).Count | Should -Be 0
+        @(ConvertFrom-AuditpolCsv @()).Count | Should -Be 0
+    }
+}
+
+Describe 'Format-RightHolder' {
+    It 'oznacza nazwę, której nie zamieniono na SID' {
+        Format-RightHolder 'Administratorzy' | Should -Be 'Administratorzy (nazwa zamiast SID, nierozpoznana na stacji przeglądu)'
     }
 }
 
@@ -333,6 +366,13 @@ Describe 'Historia przeglądów' {
         $p.CIS | Should -Be 66
         $p.MS | Should -BeNullOrEmpty   # 0 ocenionych ustawień - brak wartości, nie 0%
         $p.KontoUprzywilejowane | Should -BeNullOrEmpty
+    }
+    It 'raport 0.27: dawna nazwa trybu bez -UseWinRM jak bieżąca, klasa z najpoważniejszego znaleziska' {
+        $j = '{"Meta":{"Data":"2026-01-05T10:00:00","Wynik":70,"Obszary":{"Anomalie":70},"Wersja":"0.27","TestyDC":"sondy sieciowe + GPO z SYSVOL (zwykłe konto)"},"Znaleziska":[{"Id":"D-DCSYNC","Severity":"Critical"},{"Id":"P-PNE","Severity":"High"}]}' | ConvertFrom-Json
+        $p = ConvertTo-HistoryPoint $j
+        $p.TestyDC | Should -Be 'sondy sieciowe + GPO z SYSVOL (bez -UseWinRM)'
+        $p.Klasa | Should -Be 'E'
+        Get-DcMethodNormalized 'rejestr DC przez WinRM (konto admina)' | Should -BeLike 'rejestr i auditpol DC przez WinRM*'
     }
     It 'punkt z bieżącego przebiegu (słowniki uporządkowane)' {
         $meta = [ordered]@{ Data = '2026-02-01T09:30:00'; Wynik = 25; Obszary = [ordered]@{ Anomalie = 25 }; KlasaEkspozycji = 'E'; KontoUprzywilejowane = $false; ZgodnoscDC = [ordered]@{ CIS = 81; MS = 70 } }

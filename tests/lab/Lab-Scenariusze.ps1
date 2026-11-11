@@ -48,7 +48,7 @@ $rootAd  = "AD:\$($dom.DistinguishedName)"
 $sidDom  = $dom.DomainSID.Value
 $guidAll = [guid]'1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'   # DS-Replication-Get-Changes-All
 $guidGet = [guid]'1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'   # DS-Replication-Get-Changes
-$gpoNames = 'ADCheck-Lab LLMNR', 'ADCheck-Lab Stare lacze', 'ADCheck-Lab Bez folderu', 'ADCheck-Lab DC bez folderu', 'ADCheck-Lab GPP', 'ADCheck-Lab DC edycja'
+$gpoNames = 'ADCheck-Lab LLMNR', 'ADCheck-Lab Stare lacze', 'ADCheck-Lab Bez folderu', 'ADCheck-Lab DC bez folderu', 'ADCheck-Lab GPP', 'ADCheck-Lab DC edycja', 'ADCheck-Lab DC prawa'
 $ashAd   = "AD:\CN=AdminSDHolder,CN=System,$($dom.DistinguishedName)"
 $psoName = 'ADCheck-Lab PSO'
 $dcComp  = Get-ADComputer $dom.PDCEmulator.Split('.')[0] -Properties PrincipalsAllowedToDelegateToAccount
@@ -273,6 +273,22 @@ foreach ($dn in $ouOwn, (Get-ADGroup 'lab-wlasc-grupa').DistinguishedName, $uOwn
         Set-Acl "AD:\$dn" $a
     } catch { Write-Host "Przypadek 25: nie ustawiono właściciela $dn - $($_.Exception.Message)" -ForegroundColor Yellow }
 }
+
+# --- Przypadek 26: prawo użytkownika w GPO dla OU Domain Controllers zapisane nazwami zamiast SID (angielska i polska nazwa grupy) ---
+# Plik GptTmpl.inf bez rozszerzenia CSE w gPCMachineExtensionNames - DC go nie stosuje, ADCheck czyta go z SYSVOL.
+$gR = Get-LabGpo 'ADCheck-Lab DC prawa'
+New-GPLink -Guid $gR.Id -Target $dom.DomainControllersContainer -ErrorAction SilentlyContinue | Out-Null
+$secEdit = "\\$($dom.PDCEmulator)\SYSVOL\$($dom.DNSRoot)\Policies\{$($gR.Id)}\Machine\Microsoft\Windows NT\SecEdit"
+New-Item -ItemType Directory -Force -Path $secEdit | Out-Null
+Set-Content -LiteralPath "$secEdit\GptTmpl.inf" -Encoding Unicode -Value @'
+[Unicode]
+Unicode=yes
+[Version]
+signature="$CHICAGO$"
+Revision=1
+[Privilege Rights]
+SeTrustedCredManAccessPrivilege = Administrators,Administratorzy
+'@
 
 Write-Host 'Utworzono przypadki testowe. Oczekiwane wyniki: tests/lab/INSTRUKCJA.md.' -ForegroundColor Green
 Write-Host "Po testach: .\Lab-Scenariusze.ps1 -Domena $Domena -Usun" -ForegroundColor Yellow

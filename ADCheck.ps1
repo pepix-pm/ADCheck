@@ -1172,6 +1172,11 @@ function ConvertTo-Sid([string]$Id) {
     try { (New-Object System.Security.Principal.NTAccount $Id).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $Id }
 }
 
+# Wpis z [Privilege Rights]: SID -> nazwa; nazwa, której nie udało się zamienić na SID (np. wpisana w innym języku systemu), z dopiskiem
+function Format-RightHolder([string]$Id) {
+    if ($Id -match '^S-\d-') { Resolve-SidName $Id } else { "$Id (nazwa zamiast SID, nierozpoznana na stacji przeglądu)" }
+}
+
 $sidNames = @{}
 function Resolve-SidName([string]$Sid) {
     if (-not $sidNames.ContainsKey($Sid)) {
@@ -1345,6 +1350,14 @@ function ConvertFrom-AuditText([string]$Text) {
     if ($Text -match '(?i)(^|\s)(success|sukces|powodz)') { $v = $v -bor 1 }
     if ($Text -match '(?i)(failure|niepowodz|błąd|błęd)') { $v = $v -bor 2 }
     $v
+}
+
+# Wynik auditpol /get /category:* /r -> obiekty G (GUID podkategorii), S (ustawienie). Kolumny po pozycji (5. GUID, 6. ustawienie),
+# bo nagłówki CSV mogą być w języku systemu DC; wiersze bez GUID są pomijane.
+function ConvertFrom-AuditpolCsv([string[]]$Lines) {
+    $rows = @($Lines | Where-Object { "$_".Trim() } | Select-Object -Skip 1 |
+        ConvertFrom-Csv -Header 'Komputer', 'Cel', 'Podsystem', 'Podkategoria', 'G', 'S', 'Wylaczenie')
+    @($rows | Where-Object { "$($_.G)" -match '^\{?[0-9a-fA-F]{8}-' } | ForEach-Object { [pscustomobject]@{ G = "$($_.G)".Trim('{', '}').ToLower(); S = "$($_.S)" } })
 }
 
 function Get-TopSeverity($Rows) {
@@ -3601,10 +3614,18 @@ Invoke-Check 'DC-OS' {
 
 $dcMethod = 'pominięte'
 $dcMethodWinRM = 'rejestr i auditpol DC przez WinRM (konto z grupy Administrators domeny)'
-# Nazwa trybu z raportów sprzed 0.30 - przy porównaniu (-Previous, -History) traktowana jak bieżąca
-function Get-DcMethodNormalized([string]$Method) { if ($Method -eq 'rejestr DC przez WinRM (konto admina)') { $dcMethodWinRM } else { $Method } }
+$dcMethodGpo = 'sondy sieciowe + GPO z SYSVOL (bez -UseWinRM)'
+# Nazwy trybu z raportów starszych wersji - przy porównaniu (-Previous, -History) traktowane jak bieżące.
+# Do 0.27 tryb bez -UseWinRM opisywano jako "(zwykłe konto)" niezależnie od konta przeglądu.
+function Get-DcMethodNormalized([string]$Method) {
+    switch ($Method) {
+        'rejestr DC przez WinRM (konto admina)'         { $dcMethodWinRM }
+        'sondy sieciowe + GPO z SYSVOL (zwykłe konto)'  { $dcMethodGpo }
+        default                                         { $Method }
+    }
+}
 if (-not $SkipDCChecks) {
-    $dcMethod = if ($UseWinRM) { $dcMethodWinRM } else { 'sondy sieciowe + GPO z SYSVOL (bez -UseWinRM)' }
+    $dcMethod = if ($UseWinRM) { $dcMethodWinRM } else { $dcMethodGpo }
     $gpoSettings = @{}
     # Uzupełniamy istniejącą tabelę zamiast $script: - działa także przy uruchomieniu jako scriptblock
     if (-not $UseWinRM) { Invoke-Check 'DC-GPO' { $g = Get-DcGpoSettings; foreach ($k in $g.Keys) { $gpoSettings[$k] = $g[$k] } } }
@@ -4050,10 +4071,9 @@ if (-not $SkipDCChecks) {
                             $item = Get-ItemProperty -LiteralPath "HKLM:\$k" -Name $n -ErrorAction SilentlyContinue
                             if ($item) { $reg[$p] = $item.$n }
                         }
-                        $aud = @(auditpol.exe /get /category:* /r | ConvertFrom-Csv | ForEach-Object { [pscustomobject]@{ G = $_.'Subcategory GUID'; S = $_.'Inclusion Setting' } })
-                        [pscustomobject]@{ Reg = $reg; Audit = $aud }
+                        [pscustomobject]@{ Reg = $reg; Audit = @(auditpol.exe /get /category:* /r) }
                     }
-                    $targets.Add([pscustomobject]@{ DC = $dc.HostName; Tryb = 'WinRM'; Reg = $r.Reg; Audit = @($r.Audit) })
+                    $targets.Add([pscustomobject]@{ DC = $dc.HostName; Tryb = 'WinRM'; Reg = $r.Reg; Audit = @(ConvertFrom-AuditpolCsv @($r.Audit)) })
                 } catch {
                     $targets.Add([pscustomobject]@{ DC = "$($dc.HostName) (GPO - WinRM niedostępny)"; Tryb = 'GPO'; Reg = $null; Audit = $null })
                 }
@@ -4102,9 +4122,9 @@ if (-not $SkipDCChecks) {
                 $guid = "$($a.G)-69ae-11d9-bed3-505054503030"
                 $msE  = if ($msAuditOverride.ContainsKey($a.N)) { $msAuditOverride[$a.N] } else { $a.E }
                 if ($t.Tryb -eq 'WinRM') {
-                    $line = $t.Audit | Where-Object { "$($_.G)".Trim('{', '}').ToLower() -eq $guid } | Select-Object -First 1
+                    $line = $t.Audit | Where-Object { $_.G -eq $guid } | Select-Object -First 1
                     $val = if ($line) { ConvertFrom-AuditText $line.S } else { $null }
-                    $src = 'auditpol (WinRM)'
+                    $src = if (@($t.Audit).Count) { 'auditpol (WinRM)' } else { 'auditpol (WinRM) - nie odczytano podkategorii; sprawdź auditpol /get /category:* /r na DC' }
                 } else {
                     $g = $gpo.Audit[$guid]
                     $val = if ($g) { $g.Wartosc } else { $null }
@@ -4136,7 +4156,9 @@ if (-not $SkipDCChecks) {
                 if ($c.ContainsKey('Forbidden')) { $bad += @($sids | Where-Object { $_ -in $c.Forbidden }) }
                 $miss = @(); if ($c.ContainsKey('Required')) { $miss = @($c.Required | Where-Object { $_ -notin $sids }) }
                 $ok  = if ($bad.Count -eq 0 -and $miss.Count -eq 0) { 'Tak' } else { 'Nie' }
-                $cur = if ($sids.Count) { ($sids | ForEach-Object { Resolve-SidName $_ }) -join ', ' } else { '(nikt)' }
+                $cur = if ($sids.Count) { ($sids | ForEach-Object { Format-RightHolder $_ }) -join ', ' } else { '(nikt)' }
+                if ($bad.Count)  { $cur += '; niedozwolone: ' + (($bad | Select-Object -Unique | ForEach-Object { Format-RightHolder $_ }) -join ', ') }
+                if ($miss.Count) { $cur += '; brak wymaganych: ' + (($miss | ForEach-Object { Resolve-SidName $_ }) -join ', ') }
                 $src = $g.Zrodlo
             }
             $row = [pscustomobject]@{
@@ -4910,7 +4932,8 @@ function ConvertTo-HistoryPoint($Report) {
     [pscustomobject]@{
         Data = $date; Wersja = "$($m.Wersja)"; TestyDC = (Get-DcMethodNormalized "$($m.TestyDC)"); KontoLdap = "$($m.KontoLdap)"
         KontoUprzywilejowane = $(if ($m.PSObject.Properties.Name -contains 'KontoUprzywilejowane' -or ($m -is [System.Collections.IDictionary] -and $m.Contains('KontoUprzywilejowane'))) { [bool]$m.KontoUprzywilejowane } else { $null })
-        Wynik = [int]$m.Wynik; Klasa = "$($m.KlasaEkspozycji)"; Obszary = $areas
+        Wynik = [int]$m.Wynik; Obszary = $areas
+        Klasa = $(if ("$($m.KlasaEkspozycji)") { "$($m.KlasaEkspozycji)" } elseif ($cnt.Critical) { 'E' } elseif ($cnt.High) { 'D' } elseif ($cnt.Medium) { 'C' } elseif ($cnt.Low) { 'B' } else { 'A' })
         Critical = $cnt.Critical; High = $cnt.High; Medium = $cnt.Medium; Low = $cnt.Low; CIS = $cis; MS = $ms; Biezacy = $false
     }
 }

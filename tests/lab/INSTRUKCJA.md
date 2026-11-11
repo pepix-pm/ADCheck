@@ -1,6 +1,6 @@
 # Laboratorium testowe ADCheck
 
-Instrukcja dla osoby, która sprawdza ADCheck na domenie testowej przed wydaniem wersji. Czas: około 5 godzin, w tym około 1 godziny na przygotowanie VM.
+Instrukcja dla osoby, która sprawdza ADCheck na domenie testowej przed wydaniem wersji. Czas: około 6 godzin, w tym około 1 godziny na przygotowanie VM.
 
 > **Tylko domena testowa.** Skrypt `Lab-Scenariusze.ps1` celowo psuje konfigurację AD: nadaje prawa replikacji, zmienia grupę podstawową konta, usuwa foldery GPO z SYSVOL, ustawia delegację (także RBCD na koncie DC), dodaje wpis na AdminSDHolder, zapisuje fikcyjne hasła GPP i włącza konto Gość. Nigdy nie uruchamiaj go w domenie, z której ktoś korzysta. Sam ADCheck niczego nie zmienia.
 
@@ -38,6 +38,7 @@ Do kolejnych przebiegów dopisuj parametry na końcu (np. `-Previous <plik.json>
 | D | Po `-Usun` | LAB\Administrator na DC | `-Klient LAB -Previous <JSON z przebiegu A>` |
 | E | Po przebiegu D | LAB\Administrator na DC | `-Klient LAB -Previous <JSON z przebiegu C>` |
 | F | Po przebiegu E, **wersja 0.30 z gałęzi `main`** | LAB\Administrator na DC | `-Client LAB -History` |
+| G | Po przebiegu F, wersja 0.30 z gałęzi `main` | LAB\Administrator na DC | `-Client LAB -UseWinRM` |
 
 Kolejność kroków:
 
@@ -53,6 +54,7 @@ Kolejność kroków:
 4. Usuń przypadki testowe: `.\Lab-Scenariusze.ps1 -Domena lab.local -Usun` i odczekaj 2 minuty przed przebiegiem D. `-Usun` wyłącza też konto Gość.
 5. Przebiegi D i E.
 6. Przebieg F – przygotowanie i polecenie w sekcji „Przebieg F” poniżej.
+7. Przebieg G – przed `-Usun` z punktu F10; polecenie i sprawdzenia w sekcji „Przebieg G”.
 
 Bez stacji Windows 11 przebieg B można wykonać z dowolnego komputera z Windows w tej samej sieci:
 `runas /netonly /user:LAB\lab-zwykly powershell`, a w nowym oknie dopisać do polecenia `-Server lab.local`.
@@ -95,6 +97,7 @@ W tabeli „Sprawdzone reguły” na końcu raportu każda reguła ma status. Sz
 | 23 | `lab-zwykly` z prawem zapisu na AdminSDHolder | D-ACL-ADMINSDHOLDER; P-ACL-TIER0 | D-ACL-ADMINSDHOLDER **Critical** z `LAB\lab-zwykly`. Po przebiegu SDProp `lab-zwykly` jest też w P-ACL-TIER0 (prawa do kont uprzywilejowanych) – jeśli nie ma, zanotuj, ile minut minęło od uruchomienia skryptu |
 | 24 | PSO „ADCheck-Lab PSO” (długość 4, bez złożoności) dla `lab-operatorzy` | D-FGPP-WEAK | waga **High**; kolumna Slabsze z długością 4 i wyłączoną złożonością; w kolumnie Uprzywilejowani `lab-operatorzy` |
 | 25 | `lab-zwykly` jest właścicielem OU „ADCheck-Lab Wlasciciel”, GPO „ADCheck-Lab LLMNR”, grupy `lab-wlasc-grupa`, konta `lab-wlasc-konto` i komputera `LAB-WLASC-PC` (**wymaga wersji 0.30 – sprawdzić w przebiegu F**) | D-OWNER-OU, D-OWNER-GPO, P-OWNER-GROUP, U-OWNER-USER, C-OWNER | w każdym znalezisku wiersz z właścicielem `LAB\lab-zwykly` i odpowiednim obiektem w kolumnie Przyklady; D-OWNER-OU i D-OWNER-GPO – waga **High**. Jeśli skrypt wypisał „Przypadek 25: nie ustawiono właściciela…”, zanotuj komunikat |
+| 26 | GPO „ADCheck-Lab DC prawa” podlinkowane do OU Domain Controllers; prawo „Access Credential Manager as a trusted caller” zapisane nazwami `Administrators,Administratorzy` zamiast SID (**wymaga wersji 0.30 – sprawdzić w przebiegu F**, punkt K1) | DC-CIS-RIGHTS | patrz K1 |
 | 10 | Nawigacja w raporcie | Macierz ryzyka | kliknięcie pola ze znaleziskami rozwija listę linków; link prowadzi do szczegółów; „↑ Macierz ryzyka” wraca na górę |
 
 ### Przebieg B (zwykłe konto)
@@ -163,7 +166,40 @@ Przebieg F sprawdza wersję rozwojową 0.30 (gałąź `main`, bez weryfikacji SH
 | F7 | W historii **nie ma** przeglądu klienta INNY ani pliku uszkodzonego; pod tabelą notka „Pominięte pliki JSON (uszkodzone lub z niezgodną wersją schematu): 1.” |
 | F8 | Najechanie kursorem na punkt wykresu pokazuje nazwę serii, wartość i datę |
 | F9 | Wydruk do PDF (Ctrl+P): wykresy widoczne i nieucięte |
-| F10 | Punkt 25 (właściciele obiektów) – przebieg F wykonuje się po `-Usun`, więc przed nim utwórz przypadki ponownie (`.\Lab-Scenariusze.ps1 -Domena lab.local`), uruchom przebieg F, a na końcu znowu `-Usun`. Wtedy w F10 sprawdź wynik 25 |
+| F10 | Punkt 25 (właściciele obiektów) – przebieg F wykonuje się po `-Usun`, więc przed nim utwórz przypadki ponownie (`.\Lab-Scenariusze.ps1 -Domena lab.local`), uruchom przebiegi F i G, a na końcu znowu `-Usun`. W F10 sprawdź wynik 25 |
+
+### Przebieg F – poprawność kontroli CIS i Microsoft Security Baseline (prawa użytkowników)
+
+Kontrole porównują prawa po SID, nie po nazwie. Grupa Administrators (`S-1-5-32-544`) jest zgodna z CIS niezależnie od tego, czy raport pokazuje ją jako „BUILTIN\Administrators”, czy „BUILTIN\Administratorzy”. Te punkty to potwierdzają. Przed sprawdzeniem zanotuj język systemu DC i stacji: `Get-WinSystemLocale; (Get-UICulture).Name`.
+
+| Nr | Gdzie patrzeć | Oczekiwany wynik |
+|---|---|---|
+| K1 | DC-CIS-RIGHTS, wiersz „Access Credential Manager as a trusted caller” (przypadek 26) | Zgodne: **Nie**; Źródło: „GPO: ADCheck-Lab DC prawa”. W kolumnie Aktualne jedna nazwa zamieniona na grupę (np. „BUILTIN\Administrators” na angielskim DC), a druga z dopiskiem „(nazwa zamiast SID, nierozpoznana na stacji przeglądu)”. Która jest która, zależy od języka systemu – zanotuj |
+| K2 | DC-CIS-RIGHTS, wszystkie wiersze ze statusem Nie | Po „niedozwolone:” **nigdy** nie ma Administrators/Administratorzy, Domain Admins ani Enterprise Admins (w dowolnym języku). Wyjątek: K1, gdzie CIS wymaga, by prawo nie miało nikt |
+| K3 | DC-CIS-RIGHTS a GPMC | Dla „Back up files and directories”, „Load and unload device drivers” i „Add workstations to domain” porównaj kolumnę Aktualne z ustawieniami Default Domain Controllers Policy w GPMC (zakładka Settings). Lista grup ta sama (nazwy w języku systemu). Zgodne = Tak tylko wtedy, gdy prawo ma wyłącznie Administrators (lub Domain Admins / Enterprise Admins) |
+| K4 | DC-CIS-RIGHTS a stan na DC | Na DC: `secedit /export /areas USER_RIGHTS /cfg C:\Lab\prawa.inf` i `Select-String 'SeBackupPrivilege\|SeLoadDriverPrivilege\|SeMachineAccountPrivilege' C:\Lab\prawa.inf`. SID-y z pliku (`*S-1-5-32-544` = Administrators, `*S-1-5-32-551` = Backup Operators, `*S-1-5-32-549` = Server Operators, `*S-1-5-32-550` = Print Operators, `*S-1-5-11` = Authenticated Users) odpowiadają grupom w kolumnie Aktualne |
+| K5 | Kolumna „Microsoft” w DC-CIS-REG | wartości liczbowe i ścieżki rejestru – bez nazw grup, więc niezależne od języka; tylko zanotuj, czy któryś wiersz wygląda podejrzanie |
+
+Jeśli masz dostęp do polskiej wersji Windows Server, powtórz przypadek 26 i punkty K1–K4 na domenie zbudowanej na tej wersji. Nazwy grup wbudowanych powstają przy tworzeniu domeny w języku systemu i tylko taka domena sprawdza je naprawdę po polsku.
+
+### Przebieg G (wersja 0.30, `-UseWinRM`: zasady audytu z `auditpol`)
+
+Wersja 0.30 czyta wynik `auditpol` po pozycji kolumn, a nie po angielskich nagłówkach – na DC z polskim systemem nagłówki mogą być przetłumaczone.
+
+1. Na DC zapisz nagłówek i dwa wiersze: `auditpol /get /category:* /r | Select-Object -First 3 | Set-Content C:\Lab\auditpol.txt`.
+2. Uruchom (przypadki testowe muszą jeszcze istnieć – przebieg G wykonaj przed `-Usun` z punktu F10):
+
+   ```powershell
+   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/ADCheck/main/ADCheck.ps1).TrimStart([char]0xFEFF))) -Client LAB -UseWinRM
+   ```
+
+| Nr | Oczekiwany wynik |
+|---|---|
+| G1 | Plik `C:\Lab\auditpol.txt` – przekaż go w całości (pokazuje język nagłówków i wartości) |
+| G2 | DC-CIS-AUDIT: kolumna Źródło „auditpol (WinRM)” we wszystkich wierszach; **żaden** wiersz nie ma „nie odczytano podkategorii” |
+| G3 | Wiersze „Account Logon: Credential Validation”, „Logon/Logoff: Logon” i „Account Management: Security Group Management” zgadzają się z wynikiem na DC: `auditpol /get /subcategory:{0CCE923F-69AE-11D9-BED3-505054503030},{0CCE9215-69AE-11D9-BED3-505054503030},{0CCE9237-69AE-11D9-BED3-505054503030}` (GUID-y działają w każdym języku systemu) |
+| G4 | Wiersze z „nieustawione” w kolumnie Aktualne odpowiadają podkategoriom z „No Auditing” / „Brak inspekcji” w `auditpol /get /category:*` |
+| G5 | DC-CIS-RIGHTS: wynik K1 taki sam jak w przebiegu F (prawa nadal z GPO także przy `-UseWinRM`) |
 
 ## 4. Co przekazać
 
