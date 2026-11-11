@@ -5799,7 +5799,9 @@ $covText = "<b>Zakres oceny:</b> ocenione reguły $covDone z $covTotal ($([Math]
 if ($covParts.Count) { $covText += "; nieocenione: $($covParts -join ', ') - wynik obszarów, których dotyczą, może być zaniżony (szczegóły: <a href=`"#reguly`">Sprawdzone reguły</a>)." } else { $covText += '.' }
 [void]$sb.Append("<p class=`"note`">$covText</p>")
 if ($lowConf.Count) {
-    [void]$sb.Append("<p class=`"note`"><b>Pewność wyników:</b> $($lowConf.Count) z $($real.Count) znalezisk opiera się na źródle pośrednim lub niepełnym (np. GPO zamiast rejestru DC): $(($lowConf | ForEach-Object { "<a href=`"#$(HtmlEnc $_.Id)`">$(HtmlEnc $_.Id)</a> ($(HtmlEnc $_.Pewnosc.ToLower()))" }) -join ', '). Uzasadnienie jest w karcie znaleziska.</p>")
+    # lista budowana osobno: zagnieżdżony napis z `" wewnątrz $( ) w napisie nie parsuje się
+    $lowConfLinks = @($lowConf | ForEach-Object { '<a href="#' + (HtmlEnc $_.Id) + '">' + (HtmlEnc $_.Id) + '</a> (' + (HtmlEnc $_.Pewnosc.ToLower()) + ')' }) -join ', '
+    [void]$sb.Append("<p class=`"note`"><b>Pewność wyników:</b> $($lowConf.Count) z $($real.Count) znalezisk opiera się na źródle pośrednim lub niepełnym (np. GPO zamiast rejestru DC): $lowConfLinks. Uzasadnienie jest w karcie znaleziska.</p>")
 }
 
 if ($diff) {

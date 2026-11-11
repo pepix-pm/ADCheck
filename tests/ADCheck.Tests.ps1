@@ -600,9 +600,10 @@ Describe 'Regresja: niebezpieczne prawa w ACL (Get-AceDanger)' {
         }
     }
     It 'pełna kontrola, zmiana uprawnień i przejęcie własności' {
-        $r = @(Get-AceDanger (New-Ace $R::GenericAll $null))
-        $r.Count | Should -Be 1
-        $r[0] | Should -Match 'GenericAll'
+        # nazwa inna niż $r: zmienne nie rozróżniają wielkości liter, a $R to typ praw
+        $full = @(Get-AceDanger (New-Ace $R::GenericAll $null))
+        $full.Count | Should -Be 1
+        $full[0] | Should -Match 'GenericAll'
         (@(Get-AceDanger (New-Ace $R::WriteDacl $null)) -join ';') | Should -Match 'WriteDacl'
         (@(Get-AceDanger (New-Ace $R::WriteOwner $null)) -join ';') | Should -Match 'WriteOwner'
     }
