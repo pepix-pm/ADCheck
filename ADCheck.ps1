@@ -1306,8 +1306,10 @@ function Get-DcGpoConfidence {
     if ($gpoDcUnsure.Count)   { $why += "GPO o niepewnym zakresie: $($gpoDcUnsure.Count)" }
     if ($gpoNoFiles.Count)    { $why += "GPO bez folderu w SYSVOL: $($gpoNoFiles.Count)" }
     if ($gpoReadErrors.Count) { $why += "GPO lub pliki nieczytelne dla konta przeglądu: $($gpoReadErrors.Count)" }
-    if ($why.Count) { @{ C = 'Niska'; N = "wartości z GPO (konfiguracja zamierzona), odczyt niepełny - $($why -join '; '); stan rzeczywisty DC potwierdza -UseWinRM" } }
-    else { @{ C = 'Średnia'; N = 'wartości z GPO (konfiguracja zamierzona); stan rzeczywisty DC potwierdza przebieg z -UseWinRM' } }
+    # Z -UseWinRM z GPO pochodzą już tylko przypisania praw, których przegląd nie odczytuje z DC
+    $hint = if ($UseWinRM) { 'przypisań praw przegląd nie odczytuje z DC także przy -UseWinRM - stan rzeczywisty: secedit /export /areas USER_RIGHTS na DC' } else { 'stan rzeczywisty DC potwierdza przebieg z -UseWinRM' }
+    if ($why.Count) { @{ C = 'Niska'; N = "wartości z GPO (konfiguracja zamierzona), odczyt niepełny - $($why -join '; '); $hint" } }
+    else { @{ C = 'Średnia'; N = "wartości z GPO (konfiguracja zamierzona); $hint" } }
 }
 # Uwagi o pierwszeństwie i filtrach GPO kontrolerów domeny (do opisów DC-CIS-*): klucz = nazwa GPO lub DN kontenera
 $gpoDcNotes  = [ordered]@{}   # ustalenia: blokowanie dziedziczenia, GPO pominięte przez filtrowanie zabezpieczeń (bez wpływu na pewność)
