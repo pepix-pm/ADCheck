@@ -3708,11 +3708,19 @@ Invoke-Check 'DOMAIN' {
     }
     $rb = Get-LdapObject -Identity "CN=Recycle Bin Feature,CN=Optional Features,CN=Directory Service,CN=Windows NT,CN=Services,$configDn" -Properties 'msDS-EnabledFeatureBL'
     if (-not @($rb.'msds-enabledfeaturebl' | Where-Object { $_ }).Count) {
+        # Kosz AD wymaga poziomu funkcjonalnego lasu co najmniej Windows Server 2008 R2 (msDS-Behavior-Version 4)
+        $rbLowFfl = [int]$part.'msds-behavior-version' -lt 4
+        $rbRec = 'Włączyć Kosz AD (operacja nieodwracalna, ale bezpieczna).'
+        $rbFix = @('Enable-ADOptionalFeature -Identity ''Recycle Bin Feature'' -Scope ForestOrConfigurationSet -Target {LAS}')
+        if ($rbLowFfl) {
+            $rbRec = "Kosz AD wymaga poziomu funkcjonalnego lasu co najmniej Windows2008R2Forest (obecnie: $($forest.ForestMode)) - najpierw podnieść poziom funkcjonalny domen i lasu (patrz D-DFL, D-FFL), potem włączyć Kosz AD (operacja nieodwracalna, ale bezpieczna)."
+            $rbFix = @('Get-ADDomainController -Filter * | Select-Object HostName, OperatingSystem   # wszystkie DC co najmniej Server 2008 R2', 'Set-ADForestMode -Identity {LAS} -ForestMode Windows2008R2Forest   # lub wyżej, po podniesieniu poziomu domen') + $rbFix
+        }
         Add-Finding @{
             Id = 'D-RECYCLE'; Category = $catDom; Severity = 'Medium'; Title = 'Kosz AD nie jest włączony'
             Description = 'Usunięty obiekt (konto, grupa, OU) można odtworzyć tylko z kopii zapasowej DC.'
-            Recommendation = 'Włączyć Kosz AD (operacja nieodwracalna, ale bezpieczna).'
-            Fix = (Fx 'Enable-ADOptionalFeature -Identity ''Recycle Bin Feature'' -Scope ForestOrConfigurationSet -Target {LAS}')
+            Recommendation = $rbRec
+            Fix = (Fx $rbFix)
         }
     }
     if ($pp.MinPasswordLength -lt 12) {
