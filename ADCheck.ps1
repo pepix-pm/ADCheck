@@ -9,7 +9,7 @@
       - Print Spooler na DC: test potoku \\DC\pipe\spoolss,
       - SMBv1 na DC: sonda negocjacji SMB1 na TCP 445,
       - podpisywanie LDAP, channel binding, poziom NTLM: odczyt GPO z SYSVOL (GptTmpl.inf).
-    -UseWinRM: zamiast GPO i sond odczyt rzeczywistych wartości z rejestru DC (wymaga admina na DC).
+    -UseWinRM: zamiast GPO i sond odczyt rzeczywistych wartości z rejestru DC (wymaga członkostwa w grupie Administrators domeny).
     -Silent: bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików.
     -History: sekcja "Historia przeglądów" z wykresem wyników i zgodności DC z raportów JSON tego klienta i domeny w katalogu -OutDir.
     -Client: alias -Klient.
@@ -3600,8 +3600,11 @@ Invoke-Check 'DC-OS' {
 }
 
 $dcMethod = 'pominięte'
+$dcMethodWinRM = 'rejestr i auditpol DC przez WinRM (konto z grupy Administrators domeny)'
+# Nazwa trybu z raportów sprzed 0.30 - przy porównaniu (-Previous, -History) traktowana jak bieżąca
+function Get-DcMethodNormalized([string]$Method) { if ($Method -eq 'rejestr DC przez WinRM (konto admina)') { $dcMethodWinRM } else { $Method } }
 if (-not $SkipDCChecks) {
-    $dcMethod = if ($UseWinRM) { 'rejestr DC przez WinRM (konto admina)' } else { 'sondy sieciowe + GPO z SYSVOL (bez -UseWinRM)' }
+    $dcMethod = if ($UseWinRM) { $dcMethodWinRM } else { 'sondy sieciowe + GPO z SYSVOL (bez -UseWinRM)' }
     $gpoSettings = @{}
     # Uzupełniamy istniejącą tabelę zamiast $script: - działa także przy uruchomieniu jako scriptblock
     if (-not $UseWinRM) { Invoke-Check 'DC-GPO' { $g = Get-DcGpoSettings; foreach ($k in $g.Keys) { $gpoSettings[$k] = $g[$k] } } }
@@ -4856,7 +4859,7 @@ if ($Previous) {
     }
     # Przebiegi w innym trybie widzą inne dane (źródło testów DC, zakres widoczny dla konta) - zmiany mogą nie wynikać ze zmian w AD
     $modeDiff = [System.Collections.Generic.List[string]]::new()
-    if ("$($prev.Meta.TestyDC)" -and "$($prev.Meta.TestyDC)" -ne $dcMethod) { $modeDiff.Add("testy DC: poprzednio '$($prev.Meta.TestyDC)', teraz '$dcMethod'") }
+    if ("$($prev.Meta.TestyDC)" -and (Get-DcMethodNormalized "$($prev.Meta.TestyDC)") -ne $dcMethod) { $modeDiff.Add("testy DC: poprzednio '$($prev.Meta.TestyDC)', teraz '$dcMethod'") }
     $prevLdap = "$($prev.Meta.KontoLdap)"
     $currLdap = $(if ($ldapIdentity) { $ldapIdentity } else { 'nieustalone' })
     if ($prevLdap -and $prevLdap -ne 'nieustalone' -and $currLdap -ne 'nieustalone' -and $prevLdap -ne $currLdap) { $modeDiff.Add("konto przeglądu: poprzednio $prevLdap, teraz $currLdap") }
@@ -4905,7 +4908,7 @@ function ConvertTo-HistoryPoint($Report) {
     foreach ($s in 'Critical', 'High', 'Medium', 'Low') { $cnt[$s] = @($Report.Znaleziska | Where-Object Severity -eq $s).Count }
     $date = if ($m.Data -is [datetime]) { $m.Data } else { [datetime]::Parse("$($m.Data)", [System.Globalization.CultureInfo]::InvariantCulture) }
     [pscustomobject]@{
-        Data = $date; Wersja = "$($m.Wersja)"; TestyDC = "$($m.TestyDC)"; KontoLdap = "$($m.KontoLdap)"
+        Data = $date; Wersja = "$($m.Wersja)"; TestyDC = (Get-DcMethodNormalized "$($m.TestyDC)"); KontoLdap = "$($m.KontoLdap)"
         KontoUprzywilejowane = $(if ($m.PSObject.Properties.Name -contains 'KontoUprzywilejowane' -or ($m -is [System.Collections.IDictionary] -and $m.Contains('KontoUprzywilejowane'))) { [bool]$m.KontoUprzywilejowane } else { $null })
         Wynik = [int]$m.Wynik; Klasa = "$($m.KlasaEkspozycji)"; Obszary = $areas
         Critical = $cnt.Critical; High = $cnt.High; Medium = $cnt.Medium; Low = $cnt.Low; CIS = $cis; MS = $ms; Biezacy = $false

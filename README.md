@@ -9,9 +9,15 @@ Tworzy i rozwija [PEPIX](https://pepix.pl) – przeglądy bezpieczeństwa Active
 - Windows 10/11 lub Windows Server z PowerShellem (Windows PowerShell 5.1 lub PowerShell 7)
 - **Bez RSAT i bez instalowania czegokolwiek** – AD jest odczytywane przez LDAP (`System.DirectoryServices`, wbudowane w Windows)
 - Stacja w domenie (lub `-Server`) z dostępem do kontrolerów domeny: LDAP (TCP 389), SMB/SYSVOL (TCP 445), DNS domeny
-- Zwykłe konto domenowe; konto z uprawnieniami admina na DC tylko w trybie `-UseWinRM`
+- Konto użytkownika domeny bez uprawnień administracyjnych (wystarczy członkostwo w Domain Users). Tryb `-UseWinRM` wymaga konta z grupy Administrators domeny (np. członka Domain Admins) i dostępu WinRM (TCP 5985) do każdego DC
 
 Skrypt sprawdza wymagania na starcie i wypisuje wszystkie braki naraz.
+
+Pojęcia używane w README i raporcie:
+
+- **konto bez uprawnień administracyjnych** (także „zwykłe konto”) – konto użytkownika domeny bez członkostwa w grupach administracyjnych, zwykle tylko w Domain Users;
+- **administratorzy** – członkowie grup Domain Admins, Enterprise Admins i Administrators domeny;
+- **podmiot** – konto użytkownika, komputera lub usługi albo grupa, której nadano prawo.
 
 ## Użycie
 
@@ -30,14 +36,14 @@ clear
 | `-StaleDays` | Próg nieaktywności kont w dniach (domyślnie 90) |
 | `-Previous` | JSON z poprzedniego przeglądu do porównania |
 | `-History` | Sekcja „Historia przeglądów”: wykres wyników i zgodności DC ze wszystkich raportów JSON tego klienta i domeny w katalogu `-OutDir` (od v0.30) |
-| `-UseWinRM` | Testy DC z rejestru przez WinRM (wymaga admina na DC) |
+| `-UseWinRM` | Testy DC na podstawie rzeczywistej konfiguracji (rejestr, `auditpol`, dziennik Security) odczytanej przez WinRM; wymaga członkostwa w grupie Administrators domeny |
 | `-SkipDCChecks` | Pomija testy kontrolerów domeny |
 | `-MaxRows` | Maksymalna liczba obiektów na znalezisko w HTML (domyślnie 500; pełna lista w CSV) |
 | `-Silent` | Bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików (do automatyzacji) |
 
 ## Stacja robocza Windows 10/11
 
-Skrypt nie wymaga RSAT ani uprawnień administratora na stacji – wystarczy zwykły PowerShell.
+Skrypt nie wymaga RSAT ani uprawnień administratora lokalnego na stacji; działa w PowerShellu uruchomionym bez podniesienia uprawnień.
 
 **Stacja w badanej domenie** – zaloguj się kontem domenowym i uruchom bez `-Server`.
 
@@ -111,15 +117,15 @@ Obszar, rodzaj ryzyka i test źródłowy każdej reguły są w katalogu `$ruleCa
 
 > **Raporty zawierają informacje o podatnościach badanej organizacji.** Przechowuj je i przekazuj jak dane poufne (szyfrowany kanał, ograniczony dostęp).
 
-## Jak sprawdzane są kontrolery domeny bez uprawnień admina
+## Jak sprawdzane są kontrolery domeny bez uprawnień administracyjnych
 
 | Test | Metoda domyślna | Metoda `-UseWinRM` |
 |---|---|---|
 | Print Spooler | połączenie z potokiem `\\DC\pipe\spoolss` | stan usługi |
 | SMBv1 | sonda negocjacji tylko dialektu SMB1 na TCP 445 | `Get-SmbServerConfiguration` |
 | Podpisywanie LDAP | `GptTmpl.inf` z GPO domeny i OU Domain Controllers | rejestr DC |
-| LDAP channel binding | jw. | rejestr DC |
-| Poziom NTLM (LmCompatibilityLevel) | jw. | rejestr DC |
+| LDAP channel binding | `GptTmpl.inf` z GPO domeny i OU Domain Controllers | rejestr DC |
+| Poziom NTLM (LmCompatibilityLevel) | `GptTmpl.inf` z GPO domeny i OU Domain Controllers | rejestr DC |
 
 Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą się różnić. Testy, których nie da się rozstrzygnąć, trafiają do sekcji „Testy DC nierozstrzygnięte” i nie są traktowane jako zaliczone.
 
@@ -130,19 +136,19 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-DCSYNC | Critical / High / Medium | Prawa replikacji haseł (DCSync) dla podmiotów spoza DC i administratorów. Zestaw praw liczony dla podmiotu łącznie z jego grupami: pełny (Get-Changes + Get-Changes-All) – Critical, High, gdy tylko konto synchronizacji Entra ID; niepełny – Medium; kolumna Uwagi podaje prawa nadane przez grupy | T1003.006 |
 | D-ACL-DOMAIN | Critical | GenericAll / WriteDacl / WriteOwner / zapis atrybutów obiektu domeny poza administratorami | T1222.001 |
 | D-ACL-ADMINSDHOLDER | Critical | Niestandardowe prawa zapisu lub resetu hasła na AdminSDHolder | T1098 |
-| D-ACL-GPO | High | GPO podpięte do domeny lub OU Domain Controllers modyfikowalne przez nie-adminów (obiekt AD i katalog SYSVOL) | T1484.001 |
-| P-ACL-TIER0 | Critical / High | Nie-admini z prawami do kont i grup uprzywilejowanych, kont DC lub OU Domain Controllers: pełna kontrola, WriteDacl, WriteOwner, zapis atrybutów, członkostwo, reset hasła, Shadow Credentials, RBCD, zapis SPN, nietypowy właściciel (High, gdy dotyczy tylko konta synchronizacji Entra ID). Jeden wiersz na podmiot z liczbą obiektów i priorytetem; pełna lista w `_obiekty.csv` | T1222.001 |
+| D-ACL-GPO | High | GPO podlinkowane do domeny lub OU Domain Controllers, które mogą modyfikować konta i grupy spoza administratorów (obiekt AD i katalog SYSVOL) | T1484.001 |
+| P-ACL-TIER0 | Critical / High | Konta i grupy spoza administratorów z prawami do kont i grup uprzywilejowanych, kont DC lub OU Domain Controllers: pełna kontrola, WriteDacl, WriteOwner, zapis atrybutów, członkostwo, reset hasła, Shadow Credentials, RBCD, zapis SPN, nietypowy właściciel (High, gdy dotyczy tylko konta synchronizacji Entra ID). Jeden wiersz na podmiot z liczbą obiektów i priorytetem; pełna lista w `_obiekty.csv` | T1222.001 |
 | DC-RBCD | Critical | RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity) ustawione na koncie kontrolera domeny | T1558 |
 | D-KCD-DC | Critical / High | Delegacja ograniczona do usług DC (Critical przy przejściu protokołu na aktywnym koncie) | T1558 |
 | P-GMSA-READ | Critical / High | Hasło gMSA może pobrać szeroka grupa (Domain Users, Domain Computers…) albo gMSA jest w grupie uprzywilejowanej, a hasło pobierają serwery spoza Tier 0 (Critical przy obu warunkach naraz) | T1552 |
-| D-ADCS-ESC1 | Critical / High | Opublikowany szablon: nazwa podmiotu z żądania + EKU do logowania, bez zatwierdzania, z prawem Enroll dla nie-administratorów (Critical dla szerokich grup) | T1649 |
-| D-ADCS-ESC3 | Critical / High | Szablon agenta rejestracji (Certificate Request Agent) dostępny dla nie-administratorów | T1649 |
-| D-ADCS-ESC4 | Critical / High | Nie-administratorzy mogą zmieniać opublikowany szablon (pełna kontrola, WriteDacl, WriteOwner, zapis, właściciel) | T1649 |
-| D-ADCS-ESC5 | Critical / High | Prawa zapisu nie-administratorów do kontenerów i obiektów PKI (NTAuthCertificates, obiekt CA, szablony, OID) lub do konta komputera serwera CA | T1649 |
-| D-ADCS-ESC13 | Critical / High | Szablon z zasadą wystawiania powiązaną z grupą (msDS-OIDToGroupLink) dostępny dla nie-administratorów (Critical dla grupy uprzywilejowanej) | T1649 |
+| D-ADCS-ESC1 | Critical / High | Opublikowany szablon: nazwa podmiotu z żądania + EKU do logowania, bez zatwierdzania, z prawem Enroll dla kont i grup spoza administratorów (Critical dla szerokich grup) | T1649 |
+| D-ADCS-ESC3 | Critical / High | Szablon agenta rejestracji (Certificate Request Agent) dostępny dla kont i grup spoza administratorów | T1649 |
+| D-ADCS-ESC4 | Critical / High | Konta i grupy spoza administratorów mogą zmieniać opublikowany szablon (pełna kontrola, WriteDacl, WriteOwner, zapis, właściciel) | T1649 |
+| D-ADCS-ESC5 | Critical / High | Prawa zapisu kont i grup spoza administratorów do kontenerów i obiektów PKI (NTAuthCertificates, obiekt CA, szablony, OID) lub do konta komputera serwera CA | T1649 |
+| D-ADCS-ESC13 | Critical / High | Szablon z zasadą wystawiania powiązaną z grupą (msDS-OIDToGroupLink) dostępny dla kont i grup spoza administratorów (Critical dla grupy uprzywilejowanej) | T1649 |
 | D-ADCS-ORPHAN | High / Medium | CA wycofane (brak, wyłączone lub nieużywane konto serwera), ale nadal zarejestrowane w AD; High, gdy certyfikat CA jest w NTAuthCertificates | T1649 |
-| D-ADCS-ESC2 | High / Medium | Szablon z EKU Any Purpose lub bez EKU dostępny dla nie-administratorów | T1649 |
-| D-ADCS-ESC7 | Critical / High | Rola zarządzania CA (ManageCA, Critical) lub zarządzania certyfikatami (ManageCertificates) dla nie-administratorów – odczyt uprawnień CA przez interfejs administracyjny CA | T1649 |
+| D-ADCS-ESC2 | High / Medium | Szablon z EKU Any Purpose lub bez EKU dostępny dla kont i grup spoza administratorów | T1649 |
+| D-ADCS-ESC7 | Critical / High | Rola zarządzania CA (ManageCA, Critical) lub zarządzania certyfikatami (ManageCertificates) dla kont i grup spoza administratorów – odczyt uprawnień CA przez interfejs administracyjny CA | T1649 |
 | D-ADCS-ESC6 | High | CA z flagą EDITF_ATTRIBUTESUBJECTALTNAME2 (nazwa alternatywna z żądania) | T1649 |
 | D-ADCS-ESC11 | High | CA bez wymogu szyfrowania żądań RPC (brak IF_ENFORCEENCRYPTICERTREQUEST) – NTLM relay do CA | T1557 |
 | D-ADCS-ESC8 | High | Rejestracja przez WWW (`http://<CA>/certsrv/`) przyjmuje NTLM po HTTP – NTLM relay do CA (sonda HTTP bez poświadczeń; przy braku łączności status „Nierozstrzygnięty”) | T1557 |
@@ -176,7 +182,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | U-SPN | Medium | Konta użytkowników z SPN | T1558.003 |
 | U-SPN-WEAK | High | Konta z SPN z hasłem starszym niż 3 lata i bez AES – najbardziej narażone na Kerberoasting | T1558.003 |
 | U-SIDHIST | Medium | Konta z SIDHistory | T1134.005 |
-| U-PNE | Low | Zwykłe konta z hasłem bez wygasania | T1078.002 |
+| U-PNE | Low | Konta spoza grup uprzywilejowanych z hasłem bez wygasania | T1078.002 |
 | U-STALE | Low | Nieużywane aktywne konta | T1078.002 |
 | U-ADMINCOUNT | Low | Osierocone adminCount=1 | T1098 |
 | C-UNCONSTR | Critical | Komputery (nie-DC) z delegacją nieograniczoną | T1558 |
@@ -190,7 +196,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | C-LAPS-MISSING | Medium | Komputery bez hasła LAPS | T1550.002 |
 | C-LAPS-EXPIRED | Medium | Hasło LAPS przestało się zmieniać (wygasło, a komputer był w sieci) | T1550.002 |
 | C-LAPS-LEGACY | Low | Komputery na wycofanym Microsoft LAPS (legacy) | T1550.002 |
-| C-LAPS-READERS | Low | Kto spoza DA/EA może czytać hasła LAPS (ACL na OU) – do weryfikacji | T1555 |
+| C-LAPS-READERS | Low | Podmioty spoza Domain Admins i Enterprise Admins z prawem odczytu haseł LAPS (ACL na OU) – do weryfikacji | T1555 |
 | C-OWNER | Medium | Aktywne komputery (poza DC), których właścicielem jest konto spoza administratorów (ryzyko RBCD / odczytu LAPS) | T1134 |
 | D-OWNER-OU | High | OU, kontenery i obiekt domeny z właścicielem spoza administratorów (właściciel może nadać sobie pełną kontrolę nad zawartością) | T1222.001 |
 | D-OWNER-GPO | High / Medium | Wszystkie GPO z właścicielem spoza administratorów (Medium, gdy żadne nie ma aktywnego łącza) | T1484.001 |
@@ -261,11 +267,11 @@ Wzorzec to UBR ostatniej comiesięcznej aktualizacji zabezpieczeń (`$patchRef`,
 
 Wybrane kontrole CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) – nie pełna ocena zgodności z CIS. Treści zaleceń CIS nie są kopiowane (licencja CIS); raport podaje nazwę ustawienia, wartość oczekiwaną i aktualną.
 
-| Obszar | Zwykłe konto (domyślnie) | `-UseWinRM` (admin na DC) |
+| Obszar | Konto bez uprawnień administracyjnych (domyślnie) | `-UseWinRM` (grupa Administrators domeny) |
 |---|---|---|
 | Opcje zabezpieczeń, szablony administracyjne | GPO domeny i OU Domain Controllers: `GptTmpl.inf`, `Registry.pol` | rzeczywisty rejestr każdego DC |
 | Zasady audytu | `audit.csv` w GPO | `auditpol /get /category:*` na każdym DC |
-| Przypisanie praw użytkowników | `GptTmpl.inf` w GPO | jw. (odczyt rzeczywisty wymagałby zapisu pliku na DC) |
+| Przypisanie praw użytkowników | `GptTmpl.inf` w GPO | `GptTmpl.inf` w GPO – także przy `-UseWinRM` (odczyt rzeczywistych przypisań wymagałby zapisu pliku na DC, a skrypt działa tylko w trybie odczytu) |
 
 Ustawienie nieobecne w GPO oceniane jest według wartości domyślnej systemu; jeśli domyślna jest niezgodna z CIS – jako niezgodne. Kolejność GPO jak w pozostałych testach: domena, potem OU Domain Controllers, wg kolejności łączy; flaga Enforced i filtrowanie zabezpieczeń/WMI nie są uwzględniane. Listy kontroli są w skrypcie (`$cisReg`, `$cisAudit`, `$cisRights`).
 
@@ -304,7 +310,7 @@ Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie je
 - sondy kontrolerów domeny: dostępność portów usług AD, potok `\\DC\pipe\spoolss`, wyliczanie sesji SMB (NetSessionEnum), **próbę anonimowego zapytania LDAP**,
 - zapytanie HTTP bez poświadczeń do `http://<serwer CA>/certsrv/` i odczyt konfiguracji CA przez RPC/DCOM (interfejs administracyjny CA, tylko odczyt) – jeśli w lesie jest AD CS,
 - odczyt dziennika zdarzeń DC (bilety Kerberos z DES/RC4), jeśli konto ma do niego dostęp,
-- w trybie `-UseWinRM`: zdalne odczyty rejestru i usług na DC.
+- w trybie `-UseWinRM`: zdalne sesje PowerShell na każdym DC (odczyt rejestru, stanu usług, zasad audytu i dziennika Security).
 
 Te operacje mogą trafić do logów DC i SIEM oraz wywołać alerty (np. Microsoft Defender for Identity: rozpoznanie przez LDAP, wyliczanie sesji SMB) lub zostać zablokowane przez zaporę. Uzgodnij termin przeglądu z właścicielem środowiska i uprzedź zespół monitorujący bezpieczeństwo (SOC).
 
