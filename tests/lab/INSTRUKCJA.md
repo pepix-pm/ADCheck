@@ -55,6 +55,7 @@ Kolejność kroków:
 5. Przebiegi D i E.
 6. Przebieg F – przygotowanie i polecenie w sekcji „Przebieg F” poniżej.
 7. Przebieg G – przed `-Usun` z punktu F10; polecenie i sprawdzenia w sekcji „Przebieg G”.
+8. Przebieg H – pierwszeństwo GPO (wersja 0.31); kroki w sekcji „Przebieg H”.
 
 Bez stacji Windows 11 przebieg B można wykonać z dowolnego komputera z Windows w tej samej sieci:
 `runas /netonly /user:LAB\lab-zwykly powershell`, a w nowym oknie dopisać do polecenia `-Server lab.local`.
@@ -200,6 +201,23 @@ Wersja 0.30 czyta wynik `auditpol` po pozycji kolumn, a nie po angielskich nagł
 | G3 | Wiersze „Account Logon: Credential Validation”, „Logon/Logoff: Logon” i „Account Management: Security Group Management” zgadzają się z wynikiem na DC: `auditpol /get /subcategory:{0CCE923F-69AE-11D9-BED3-505054503030},{0CCE9215-69AE-11D9-BED3-505054503030},{0CCE9237-69AE-11D9-BED3-505054503030}` (GUID-y działają w każdym języku systemu) |
 | G4 | Wiersze z „nieustawione” w kolumnie Aktualne odpowiadają podkategoriom z „No Auditing” / „Brak inspekcji” w `auditpol /get /category:*` |
 | G5 | DC-CIS-RIGHTS: wynik K1 taki sam jak w przebiegu F (prawa nadal z GPO także przy `-UseWinRM`) |
+
+### Przebieg H (wersja 0.31: pierwszeństwo GPO kontrolerów domeny)
+
+Wersja 0.31 uwzględnia łącza wymuszone (Enforced), blokowanie dziedziczenia, filtrowanie zabezpieczeń i filtry WMI. Każdy krok: zmiana w GPMC, potem przebieg zwykłym kontem bez `-UseWinRM` (`-Client LAB`), potem cofnięcie zmiany. Sprawdzany wiersz: DC-CIS-SUMMARY, ustawienie „Network security: LAN Manager authentication level” (kolumny Aktualne i Źródło).
+
+Przygotowanie: GPO `Lab-H-Domena` podlinkowane do domeny z LmCompatibilityLevel = 3 („Send NTLMv2 response only”) oraz GPO `Lab-H-DC` podlinkowane do OU Domain Controllers z wartością 5 („…Refuse LM & NTLM”), z kolejnością łącza 1.
+
+| Nr | Zmiana | Oczekiwany wynik |
+|---|---|---|
+| H1 | bez zmian | Aktualne 5, Źródło „GPO: Lab-H-DC” |
+| H2 | łącze `Lab-H-Domena` do domeny: Enforced | Aktualne 3, Źródło „GPO: Lab-H-Domena (wymuszone)”; na DC `gpresult /r /scope computer` potwierdza to samo |
+| H3 | H2 cofnięte; na OU Domain Controllers: Block Inheritance | Aktualne 5; opis DC-CIS-REG zawiera „OU Domain Controllers blokuje dziedziczenie”; ustawienia z Default Domain Policy (np. z GPO domeny) nie są źródłem żadnego wiersza |
+| H4 | H3 cofnięte; `Lab-H-DC`: z Security Filtering usunięte Authenticated Users, dodana grupa bez DC (Authenticated Users zostaje z samym odczytem na karcie Delegation) | Aktualne 3, Źródło „GPO: Lab-H-Domena”; opis zawiera „GPO 'Lab-H-DC' … pominięto - filtrowanie zabezpieczeń nie obejmuje kontrolerów domeny” |
+| H5 | H4 cofnięte; do `Lab-H-DC` przypisany dowolny filtr WMI | Aktualne 5, Źródło „GPO: Lab-H-DC (niepewne: filtr WMI)”; opis wymienia to GPO |
+| H6 | GPO z wyłączeniem LLMNR podlinkowane do domeny + filtr WMI na tym GPO | Sprawdzone reguły: D-GPO-LLMNR „Zaliczony warunkowo (GPO domeny z ustawieniem ma ograniczony zakres…)” |
+| H7 | H6 bez filtra WMI; OU z aktywnym komputerem ma Block Inheritance | D-GPO-LLMNR „Zaliczony warunkowo (OU z komputerami blokujące dziedziczenie…)”; po ustawieniu Enforced na łączu – „Zaliczony” |
+| H8 | `-History -MaxHistoryPoints 3` przy co najmniej 4 raportach LAB w katalogu | Wykres i tabela mają 3 przeglądy (2 najnowsze + bieżący) i notkę o pominiętych starszych |
 
 ## 4. Co przekazać
 

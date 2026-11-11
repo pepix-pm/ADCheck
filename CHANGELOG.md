@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.31 – 2026-11-11
+
+- **Pierwszeństwo GPO kontrolerów domeny** (DC-LDAPSIGN, DC-LDAPCBT, DC-NTLMV1, DC-CIS-*, DC-MSBASE – odczyt z GPO): uwzględniane są łącza wymuszone (Enforced; wygrywają z GPO niższego poziomu, a wymuszone łącze domeny – z wymuszonym na OU) i blokowanie dziedziczenia na OU Domain Controllers (niewymuszone GPO domeny są pomijane). Wcześniej wygrywało zawsze GPO z OU Domain Controllers, więc przy wymuszonym GPO domeny raport mógł podać wartość, której DC nie stosuje.
+- **Filtrowanie zabezpieczeń i filtry WMI GPO kontrolerów domeny**: GPO, w którym prawo „Zastosuj zasady grupy” nie obejmuje żadnego DC (konto DC, jego grupy, Authenticated Users, Enterprise Domain Controllers; z odmowami), jest pomijane. GPO z filtrem WMI lub obejmujące tylko część DC jest stosowane, ale kolumna Źródło ma dopisek „niepewne: …”, a opis DC-CIS-* wymienia takie GPO. Łącze wymuszone ma w kolumnie Źródło dopisek „wymuszone”.
+- **D-GPO-LLMNR, D-GPO-PSLOG**: „Zaliczony warunkowo” także wtedy, gdy GPO domeny z ustawieniem ma filtr WMI lub filtrowanie zabezpieczeń nieobejmujące wszystkich komputerów, albo gdy OU z aktywnymi komputerami blokuje dziedziczenie, a łącze GPO do domeny nie jest wymuszone (wcześniej „Zaliczony”).
+- **`-MaxHistoryPoints`** (domyślnie 24): `-History` bierze najnowsze przeglądy i nie otwiera starszych plików po osiągnięciu limitu; raport i konsola informują o pominiętych starszych przeglądach.
+- Nieuwzględniane nadal: GPO podlinkowane do lokacji (site), treść filtrów WMI.
+
 ## 0.30 – 2026-11-09
 
 - **`-History`**: sekcja „Historia przeglądów” w raporcie HTML – wykres wyniku ogólnego i obszarów oraz zgodności DC (CIS L1, Microsoft Security Baseline) w kolejnych przeglądach i tabela przeglądów. Dane z plików JSON w katalogu `-OutDir` – tylko ten sam klient i domena; pliki uszkodzone lub z niezgodną główną wersją schematu są pomijane (komunikat na konsoli i w raporcie). Przeglądy w innym trybie niż bieżący (testy DC, konto LDAP) mają pusty znacznik. Wykres SVG wpisany w raport, bez bibliotek zewnętrznych. Zgodność DC dla raportów sprzed 0.30 odczytywana z tytułu DC-CIS-SUMMARY.

@@ -12,6 +12,7 @@
     -UseWinRM: zamiast GPO i sond odczyt rzeczywistych wartości z rejestru DC (wymaga członkostwa w grupie Administrators domeny).
     -Silent: bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików.
     -History: sekcja "Historia przeglądów" z wykresem wyników i zgodności DC z raportów JSON tego klienta i domeny w katalogu -OutDir.
+    -MaxHistoryPoints: największa liczba przeglądów w historii (domyślnie 24 najnowsze, razem z bieżącym).
     -Client: alias -Klient.
     Wynik: szczegółowy raport HTML, JSON (do porównań), CSV znalezisk i CSV obiektów.
     Punkty: Critical=25, High=10, Medium=3, Low=1 za znalezisko; wynik 0-100 w czterech obszarach ryzyka,
@@ -42,11 +43,12 @@ param(
     [switch]$SkipDCChecks,
     [int]$MaxRows = 500,
     [switch]$Silent,
-    [switch]$History
+    [switch]$History,
+    [ValidateRange(2, 500)][int]$MaxHistoryPoints = 24
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.30'
+$Version = '0.31'
 $jsonSchemaVersion = '1.2'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -311,7 +313,7 @@ function Get-LdapDomainControllers {
         try { $ip = "$(@([System.Net.Dns]::GetHostAddresses($c.dnshostname) | Where-Object AddressFamily -eq 'InterNetwork')[0])" } catch { $ip = '' }
         [pscustomobject]@{
             Name = $c.name; HostName = $c.dnshostname; OperatingSystem = $c.operatingsystem; OperatingSystemVersion = $c.operatingsystemversion
-            Site = $site; IPv4Address = $ip; IsGlobalCatalog = $gc; IsReadOnly = ([int]$c.primarygroupid -eq 521); ComputerObjectDN = $c.distinguishedname
+            Site = $site; IPv4Address = $ip; IsGlobalCatalog = $gc; IsReadOnly = ([int]$c.primarygroupid -eq 521); ComputerObjectDN = $c.distinguishedname; Sid = "$($c.SID)"
         }
     }
 }
@@ -1054,8 +1056,11 @@ function Test-Smb1([string]$Computer, [int]$TimeoutMs = 3000) {
 }
 
 # Ustawienia bezpieczeństwa DC z GPO podlinkowanych do domeny i OU Domain Controllers (odczyt z SYSVOL).
-# Kolejność: najpierw domena, potem OU DC; w gPLink ostatni wpis = kolejność łącza 1, więc wygrywa późniejszy.
-# Uproszczenie: pomijane łącza wyłączone i GPO z wyłączoną częścią Komputer; flaga Enforced nie jest uwzględniana.
+# Pierwszeństwo jak w przetwarzaniu zasad grupy: łącza zwykłe od domeny w dół (w gPLink ostatni wpis = kolejność łącza 1,
+# więc wygrywa późniejszy), potem łącza wymuszone (Enforced) - wyższy poziom wygrywa. Blokowanie dziedziczenia na OU pomija
+# niewymuszone łącza z wyższych poziomów. Pomijane: łącza wyłączone, GPO z wyłączoną częścią Komputer i GPO, których
+# filtrowanie zabezpieczeń nie obejmuje żadnego DC. Filtrów WMI nie da się ocenić bez DC - takie GPO jest stosowane
+# z dopiskiem "niepewne" w kolumnie Źródło. Nieuwzględniane: GPO podlinkowane do lokacji (site) i zasady lokalne DC.
 # GPO domeny i OU Domain Controllers, których konto przeglądu nie mogło odczytać (zamiast przerywać testy DC)
 $gpoReadErrors = @{}
 # GPO podlinkowane do domeny lub OU Domain Controllers, których folderu nie ma w SYSVOL (ustawienia nie są stosowane)
@@ -1070,36 +1075,131 @@ function Test-GpoMissing([string]$Dn) {
     try { $null = Get-LdapObject -Identity $Dn -Properties displayName; $false }
     catch { ($_.Exception.HResult -eq -2147016656) -or [bool]($_.Exception.InnerException -and $_.Exception.InnerException.HResult -eq -2147016656) }
 }
-# Odczyt GPO z gPLink kontenera; zwraca obiekty GPO z displayName, gPCFileSysPath, flags; błędy trafiają do $gpoReadErrors
+# gPLink -> łącza w kolejności zapisu (ostatni wpis = kolejność łącza 1 = najwyższy priorytet).
+# Opcje łącza: bit 1 = łącze wyłączone, bit 2 = wymuszone (Enforced).
+function ConvertFrom-GpLink([string]$GpLink) {
+    foreach ($m in [regex]::Matches("$GpLink", '\[LDAP://([^;\]]+);(\d+)\]')) {
+        $o = [int]$m.Groups[2].Value
+        [pscustomobject]@{ Dn = $m.Groups[1].Value; Disabled = [bool]($o -band 1); Enforced = [bool]($o -band 2) }
+    }
+}
+# Kolejność stosowania GPO dla obiektu w najniższym kontenerze - późniejszy wpis wygrywa.
+# $Containers: od domeny w dół, każdy z polami Dn, GpLink, Block (gPOptions bit 1 = blokowanie dziedziczenia).
+# Zwraca łącza zwykłe od góry (bez tych powyżej kontenera blokującego dziedziczenie), a po nich wymuszone od dołu do góry.
+function Get-GpoApplyOrder([object[]]$Containers) {
+    $block = -1
+    for ($i = 0; $i -lt $Containers.Count; $i++) { if ($Containers[$i].Block) { $block = $i } }
+    $normal = [System.Collections.Generic.List[object]]::new()
+    $forced = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $Containers.Count; $i++) {
+        if ($i -lt $block) { continue }
+        foreach ($l in @(ConvertFrom-GpLink "$($Containers[$i].GpLink)")) {
+            if ($l.Disabled -or $l.Enforced) { continue }
+            $normal.Add([pscustomobject]@{ Dn = $l.Dn; Enforced = $false; Container = "$($Containers[$i].Dn)" })
+        }
+    }
+    for ($i = $Containers.Count - 1; $i -ge 0; $i--) {
+        foreach ($l in @(ConvertFrom-GpLink "$($Containers[$i].GpLink)")) {
+            if ($l.Disabled -or -not $l.Enforced) { continue }
+            $forced.Add([pscustomobject]@{ Dn = $l.Dn; Enforced = $true; Container = "$($Containers[$i].Dn)" })
+        }
+    }
+    @($normal) + @($forced)
+}
+# Filtrowanie zabezpieczeń GPO: SID-y z prawem "Zastosuj zasady grupy" (Apply Group Policy) - zezwolenia i odmowy.
+$gpoApplyGuid = [guid]'edacfd8f-ffb3-11d1-b41d-00a0c968f939'
+function Get-GpoApplySids($Sd) {
+    $allow = [System.Collections.Generic.List[string]]::new()
+    $deny  = [System.Collections.Generic.List[string]]::new()
+    if ($Sd -is [System.DirectoryServices.ActiveDirectorySecurity]) {
+        $R = [System.DirectoryServices.ActiveDirectoryRights]
+        foreach ($a in $Sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+            if ($a.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            if (-not ($a.ActiveDirectoryRights -band $R::ExtendedRight)) { continue }
+            if ($a.ObjectType -ne [guid]::Empty -and $a.ObjectType -ne $gpoApplyGuid) { continue }
+            if ($a.AccessControlType -eq 'Allow') { $allow.Add($a.IdentityReference.Value) } else { $deny.Add($a.IdentityReference.Value) }
+        }
+    }
+    [pscustomobject]@{ Allow = @($allow | Select-Object -Unique); Deny = @($deny | Select-Object -Unique) }
+}
+# Czy filtrowanie zabezpieczeń GPO obejmuje konta o podanych zestawach SID (zestaw = SID konta i jego grup; $null = nieustalony).
+# 'Tak' - wszystkie, 'Nie' - żadne, 'Czesc' - tylko część, '?' - nie da się ustalić.
+function Test-GpoSecurityFilter([string[]]$Allow, [string[]]$Deny, [object[]]$TokenSets) {
+    if (-not $TokenSets -or -not $TokenSets.Count) { return '?' }
+    $yes = 0; $no = 0
+    foreach ($t in $TokenSets) {
+        if ($null -eq $t) { return '?' }
+        $set = @($t)
+        $ok = (@($Allow | Where-Object { $set -contains $_ }).Count -gt 0) -and (@($Deny | Where-Object { $set -contains $_ }).Count -eq 0)
+        if ($ok) { $yes++ } else { $no++ }
+    }
+    if (-not $no) { 'Tak' } elseif (-not $yes) { 'Nie' } else { 'Czesc' }
+}
+# Uwagi o pierwszeństwie i filtrach GPO kontrolerów domeny (do opisów DC-CIS-*): klucz = nazwa GPO lub DN kontenera
+$gpoDcNotes = [ordered]@{}
+$gpoDcCache = @{}
+# GPO obejmujące DC w kolejności stosowania (późniejszy wygrywa): displayName, gPCFileSysPath, Zrodlo; błędy trafiają do $gpoReadErrors
 function Get-DcLinkedGpo {
+    if ($gpoDcCache.ContainsKey('list')) { return $gpoDcCache['list'] }
     # Wszystkie GPO jednym wyszukiwaniem: GPO bez prawa odczytu po prostu nie wraca (bezpośrednie wiązanie z takim obiektem daje 0x8007200A)
     $all = @{}
     try {
-        foreach ($g in @(Find-Ldap -SearchBase "CN=Policies,CN=System,$($domain.DistinguishedName)" -Scope OneLevel -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, gPCFileSysPath, flags)) {
+        foreach ($g in @(Find-Ldap -SearchBase "CN=Policies,CN=System,$($domain.DistinguishedName)" -Scope OneLevel -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, gPCFileSysPath, flags, gPCWQLFilter, nTSecurityDescriptor -SecurityDescriptor)) {
             $all["$($g.distinguishedname)".ToLower()] = $g
         }
     } catch { $gpoReadErrors['CN=Policies'] = Get-ErrorText $_ }
-    foreach ($container in @($domain.DistinguishedName, $domain.DomainControllersContainer)) {
-        $gpLink = $null
-        try { $gpLink = (Get-LdapObject -Identity $container -Properties gPLink).gplink }
-        catch { $gpoReadErrors["gPLink: $container"] = Get-ErrorText $_; continue }
-        if (-not $gpLink) { continue }
-        foreach ($m in [regex]::Matches($gpLink, '\[LDAP://([^;\]]+);(\d+)\]')) {
-            if ([int]$m.Groups[2].Value -band 1) { continue }
-            $dn = $m.Groups[1].Value
-            $gpo = $all[$dn.ToLower()]
-            if (-not $gpo) {
-                # łącze do usuniętego GPO zgłasza D-GPO-DEADLINK; tu tylko GPO nieczytelne
-                if (-not (Test-GpoMissing $dn)) { $gpoReadErrors[$dn] = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu)' }
+    # Kontenery od domeny do OU Domain Controllers (zwykle dwa; OU pośrednie tylko po przeniesieniu OU DC)
+    $domDn = "$($domain.DistinguishedName)"; $dcOu = "$($domain.DomainControllersContainer)"
+    $chain = [System.Collections.Generic.List[string]]::new()
+    $c = $dcOu
+    while ($c -and $c -ine $domDn -and $chain.Count -lt 10) { $chain.Insert(0, $c); $c = Get-ParentOU $c }
+    $chain.Insert(0, $domDn)
+    $where = { param([string]$Dn) if ($Dn -ieq $domDn) { 'domeny' } elseif ($Dn -ieq $dcOu) { 'OU Domain Controllers' } else { "OU $((($Dn -split '(?<!\\),')[0]) -replace '^(OU|CN)=', '')" } }
+    $containers = [System.Collections.Generic.List[object]]::new()
+    foreach ($cn in $chain) {
+        $o = $null
+        try { $o = Get-LdapObject -Identity $cn -Properties gPLink, gPOptions }
+        catch { $gpoReadErrors["gPLink: $cn"] = Get-ErrorText $_; continue }
+        $blk = [bool]([int]$o.gpoptions -band 1)
+        if ($blk -and $cn -ine $domDn) { $gpoDcNotes[$cn] = "$(& $where $cn) blokuje dziedziczenie - niewymuszone GPO z wyższych poziomów nie są stosowane na DC i zostały pominięte" }
+        $containers.Add([pscustomobject]@{ Dn = $cn; GpLink = "$($o.gplink)"; Block = ($blk -and $cn -ine $domDn) })
+    }
+    # Zestawy SID kont DC (konto, grupy, Enterprise Domain Controllers) do oceny filtrowania zabezpieczeń
+    $tokens = [System.Collections.Generic.List[object]]::new()
+    foreach ($d in $dcs) {
+        $t = $null
+        if ($d.Sid) { $t = Get-PrincipalGroupSids $d.Sid }
+        if ($t) { $tokens.Add([string[]](@($t) + 'S-1-5-9')) } else { $tokens.Add($null) }
+    }
+    $list = [System.Collections.Generic.List[object]]::new()
+    foreach ($l in @(Get-GpoApplyOrder $containers.ToArray())) {
+        $gpo = $all[$l.Dn.ToLower()]
+        if (-not $gpo) {
+            # łącze do usuniętego GPO zgłasza D-GPO-DEADLINK; tu tylko GPO nieczytelne
+            if (-not (Test-GpoMissing $l.Dn)) { $gpoReadErrors[$l.Dn] = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu)' }
+            continue
+        }
+        if ([int]$gpo.flags -band 2) { continue }
+        $name = "$($gpo.displayName)"; $place = & $where $l.Container
+        $unsure = [System.Collections.Generic.List[string]]::new()
+        if ("$($gpo.gpcwqlfilter)".Trim()) { $unsure.Add('filtr WMI') }
+        if ($gpo.ntsecuritydescriptor -is [System.DirectoryServices.ActiveDirectorySecurity]) {
+            $f = Get-GpoApplySids $gpo.ntsecuritydescriptor
+            $res = Test-GpoSecurityFilter $f.Allow $f.Deny $tokens.ToArray()
+            if ($res -eq 'Nie') {
+                $gpoDcNotes[$name] = "GPO '$name' (podlinkowane do $place) pominięto - filtrowanie zabezpieczeń nie obejmuje kontrolerów domeny"
                 continue
             }
-            if ($gpo.flags -band 2) { continue }
-            if ($gpo.gPCFileSysPath -and -not (Test-Path -LiteralPath $gpo.gPCFileSysPath)) {
-                $gpoNoFiles["$($gpo.displayName)"] = $(if ($container -eq $domain.DistinguishedName) { 'domeny' } else { 'OU Domain Controllers' })
-            }
-            $gpo
-        }
+            if ($res -eq 'Czesc') { $unsure.Add('filtrowanie zabezpieczeń obejmuje tylko część DC') }
+            elseif ($res -eq '?') { $unsure.Add('filtrowanie zabezpieczeń nieustalone') }
+        } else { $unsure.Add('uprawnienia GPO nieodczytane') }
+        if ($unsure.Count) { $gpoDcNotes[$name] = "GPO '$name' (podlinkowane do $place): $($unsure -join ', ') - nie da się potwierdzić, że jego ustawienia obejmują wszystkie DC" }
+        if ($gpo.gPCFileSysPath -and -not (Test-Path -LiteralPath $gpo.gPCFileSysPath)) { $gpoNoFiles[$name] = $place }
+        $tag = @($(if ($l.Enforced) { 'wymuszone' }), $(if ($unsure.Count) { "niepewne: $($unsure -join ', ')" })) | Where-Object { $_ }
+        $list.Add([pscustomobject]@{ displayName = $name; gPCFileSysPath = $gpo.gPCFileSysPath; Zrodlo = "GPO: $name$(if ($tag) { " ($($tag -join '; '))" })" })
     }
+    $gpoDcCache['list'] = $list.ToArray()
+    $gpoDcCache['list']
 }
 
 function Get-DcGpoSettings {
@@ -1119,7 +1219,7 @@ function Get-DcGpoSettings {
                 $line = $content | Where-Object { $_ -like "$($keys[$k])=*" } | Select-Object -First 1
                 if ($line) {
                     $val = (($line -split '=', 2)[1] -split ',')[-1].Trim()
-                    $result[$k] = [pscustomobject]@{ Wartosc = [int]$val; Zrodlo = "GPO: $($gpo.displayName)" }
+                    $result[$k] = [pscustomobject]@{ Wartosc = [int]$val; Zrodlo = $gpo.Zrodlo }
                 }
             }
     }
@@ -1194,13 +1294,13 @@ function Resolve-SidName([string]$Sid) {
     $sidNames[$Sid]
 }
 
-# Zbiorcza konfiguracja z GPO podlinkowanych do domeny i OU Domain Controllers (kolejność i uproszczenia jak w Get-DcGpoSettings).
+# Zbiorcza konfiguracja z GPO obejmujących DC (kolejność, pierwszeństwo i filtry: Get-DcLinkedGpo).
 # Registry: 'ścieżka\wartość' (małe litery, bez HKLM) -> {Wartosc, Zrodlo}; Rights: SeXxx -> {Wartosc = SID-y, Zrodlo}; Audit: GUID podkategorii -> {Wartosc 0-3, Zrodlo}
 function Get-DcGpoPolicy {
     $pol = [pscustomobject]@{ Registry = @{}; Rights = @{}; Audit = @{} }
     foreach ($gpo in @(Get-DcLinkedGpo)) {
         try {
-            $src  = "GPO: $($gpo.displayName)"
+            $src  = $gpo.Zrodlo
             $root = Join-Path $gpo.gPCFileSysPath 'Machine'
 
             $inf = Join-Path $root 'Microsoft\Windows NT\SecEdit\GptTmpl.inf'
@@ -1241,29 +1341,33 @@ function Get-DcGpoPolicy {
 }
 
 # Wszystkie GPO z włączonym łączem (domena, OU, lokacje) -> wpisy rejestru komputera z Registry.pol i preferencji (Registry.xml).
-# Bez kolejności, filtrów zabezpieczeń i WMI: odpowiada na pytanie "czy któreś GPO ustawia X", a nie "co dostaje dany komputer".
+# Bez kolejności: odpowiada na pytanie "czy któreś GPO ustawia X", a nie "co dostaje dany komputer". Filtr: GPO z filtrem WMI
+# lub filtrowaniem zabezpieczeń, które nie obejmuje wszystkich komputerów; Wymuszone: łącze do korzenia domeny z flagą Enforced.
 # Kolumna Domena: GPO podlinkowane do korzenia domeny (obejmuje wszystkie komputery, o ile nie blokuje go OU lub filtr);
 # Zakres: miejsca podlinkowania. GPO nieczytelne dla konta przeglądu trafiają do $gpoAllUnread.
 $gpoAllUnread = [System.Collections.Generic.List[string]]::new()
 $gpoUnreadWhere = @{}   # DN GPO (małe litery) -> miejsca podlinkowania, do INFO-GPO-READ
 function Get-LinkedGpoRegistry {
     $links = @{}
+    $forcedDom = @{}   # DN GPO (małe litery) -> łącze do korzenia domeny jest wymuszone (Enforced)
     $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
     foreach ($h in $holders) {
-        foreach ($m in [regex]::Matches("$($h.gplink)", '\[LDAP://([^;\]]+);(\d+)\]')) {
-            if (-not ([int]$m.Groups[2].Value -band 1)) {
-                $k = $m.Groups[1].Value.ToLower()
-                if (-not $links.ContainsKey($k)) { $links[$k] = [System.Collections.Generic.List[string]]::new() }
-                $links[$k].Add("$($h.distinguishedname)")
-            }
+        foreach ($l in @(ConvertFrom-GpLink "$($h.gplink)")) {
+            if ($l.Disabled) { continue }
+            $k = $l.Dn.ToLower()
+            if (-not $links.ContainsKey($k)) { $links[$k] = [System.Collections.Generic.List[string]]::new() }
+            $links[$k].Add("$($h.distinguishedname)")
+            if ($l.Enforced -and "$($h.distinguishedname)" -ieq $domainDn) { $forcedDom[$k] = $true }
         }
     }
+    # SID-y, które ma każdy komputer domeny: filtrowanie zabezpieczeń bez żadnego z nich zawęża zakres GPO
+    $everyPc = @('S-1-1-0', 'S-1-5-11', "$dSid-515")
     $out = [System.Collections.Generic.List[object]]::new()
     foreach ($dn in $links.Keys) {
         $gpo = $null
         # 0x80072030 (brak obiektu): łącze do usuniętego GPO - pomijane; pusty wynik lub inny błąd: GPO nieczytelne dla konta przeglądu
         $stale = $false
-        try { $gpo = Get-LdapObject -Identity $dn -Properties displayName, gPCFileSysPath, flags }
+        try { $gpo = Get-LdapObject -Identity $dn -Properties displayName, gPCFileSysPath, flags, gPCWQLFilter, nTSecurityDescriptor -SecurityDescriptor }
         catch { $gpo = $null; $stale = ($_.Exception.HResult -eq -2147016656) -or ($_.Exception.InnerException -and $_.Exception.InnerException.HResult -eq -2147016656) }
         if ($stale) { continue }
         if (-not $gpo -or -not $gpo.gpcfilesyspath) {
@@ -1274,11 +1378,19 @@ function Get-LinkedGpoRegistry {
         if ([int]$gpo.flags -band 2) { continue }
         $isDom = @($links[$dn] | Where-Object { $_ -ieq $domainDn }).Count -gt 0
         $scope = (@($links[$dn] | ForEach-Object { if ($_ -ieq $domainDn) { 'domena' } else { ($_ -split '(?<!\\),')[0] -replace '^(OU|CN)=', '' } }) | Sort-Object -Unique) -join ', '
+        # Filtr WMI lub filtrowanie zabezpieczeń inne niż "wszystkie komputery": GPO może nie obejmować części komputerów
+        $flt = [System.Collections.Generic.List[string]]::new()
+        if ("$($gpo.gpcwqlfilter)".Trim()) { $flt.Add('filtr WMI') }
+        if ($gpo.ntsecuritydescriptor -is [System.DirectoryServices.ActiveDirectorySecurity]) {
+            $f = Get-GpoApplySids $gpo.ntsecuritydescriptor
+            if ((Test-GpoSecurityFilter $f.Allow $f.Deny @(, [string[]]$everyPc)) -ne 'Tak') { $flt.Add('filtrowanie zabezpieczeń') }
+        }
+        $filtr = $flt -join ', '; $forced = $forcedDom.ContainsKey($dn)
         $root = Join-Path $gpo.gpcfilesyspath 'Machine'
         $polFile = Join-Path $root 'Registry.pol'
         if (Test-Path -LiteralPath $polFile) {
             foreach ($e in @(Read-RegistryPol ([System.IO.File]::ReadAllBytes($polFile)))) {
-                $out.Add([pscustomobject]@{ Gpo = $gpo.displayname; Key = $e.Key; Name = $e.Name; Data = $e.Data; Deleted = $e.Deleted; Domena = $isDom; Zakres = $scope })
+                $out.Add([pscustomobject]@{ Gpo = $gpo.displayname; Key = $e.Key; Name = $e.Name; Data = $e.Data; Deleted = $e.Deleted; Domena = $isDom; Zakres = $scope; Filtr = $filtr; Wymuszone = $forced })
             }
         }
         $xmlFile = Join-Path $root 'Preferences\Registry\Registry.xml'
@@ -1289,7 +1401,7 @@ function Get-LinkedGpoRegistry {
                 if ($p.hive -ne 'HKEY_LOCAL_MACHINE' -or $p.action -eq 'D') { continue }
                 $d = $p.value
                 if ($p.type -eq 'REG_DWORD') { try { $d = [Convert]::ToInt64($p.value, 16) } catch { $d = $p.value } }
-                $out.Add([pscustomobject]@{ Gpo = "$($gpo.displayname) (preferencje)"; Key = $p.key; Name = $p.name; Data = $d; Deleted = $false; Domena = $isDom; Zakres = $scope })
+                $out.Add([pscustomobject]@{ Gpo = "$($gpo.displayname) (preferencje)"; Key = $p.key; Name = $p.name; Data = $d; Deleted = $false; Domena = $isDom; Zakres = $scope; Filtr = $filtr; Wymuszone = $forced })
             }
         }
     }
@@ -3803,11 +3915,26 @@ if (-not $SkipDCChecks) {
         $pick = { param([string]$KeyEnd, [string]$Name)
                   @($gpoReg | Where-Object { $_.Key -match ([regex]::Escape($KeyEnd) + '$') -and (-not $Name -or $_.Name -eq $Name) }) }
         $row  = { [pscustomobject]@{ GPO = $_.Gpo; Ustawienie = "$($_.Key)\$($_.Name)"; Wartosc = "$($_.Data)"; Podlinkowane = $_.Zakres } }
-        # Zaliczenie tylko, gdy ustawienie jest w GPO podlinkowanym do korzenia domeny; samo GPO na OU/lokacji nie dowodzi,
-        # że obejmuje wszystkie komputery. Blokowanie dziedziczenia, filtrowanie zabezpieczeń i WMI nie są oceniane.
+        # OU z komputerami, które blokują dziedziczenie: niewymuszone GPO domeny ich nie obejmuje
+        $blockOus = @()
+        try {
+            $blockOus = @(Find-Ldap -Filter '(&(objectClass=organizationalUnit)(gPOptions:1.2.840.113556.1.4.803:=1))' | Where-Object {
+                "$($_.distinguishedname)" -ine "$($domain.DomainControllersContainer)" -and
+                @(Find-Ldap -SearchBase "$($_.distinguishedname)" -Filter '(&(objectCategory=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))' | Select-Object -First 1).Count
+            } | ForEach-Object { "$($_.name)" })
+        } catch { $blockOus = @() }
+        # Zaliczenie tylko, gdy ustawienie jest w GPO podlinkowanym do korzenia domeny bez filtra WMI i z filtrowaniem zabezpieczeń
+        # obejmującym wszystkie komputery, a żadne OU z komputerami nie blokuje dziedziczenia (chyba że łącze jest wymuszone).
+        # Samo GPO na OU/lokacji nie dowodzi, że obejmuje wszystkie komputery.
         $cond = { param([string]$Id, [object[]]$Ok)
-                  if (@($Ok).Count -and -not @($Ok | Where-Object Domena).Count) {
+                  $dom  = @($Ok | Where-Object Domena)
+                  $full = @($dom | Where-Object { -not $_.Filtr })
+                  if (@($Ok).Count -and -not $dom.Count) {
                       $ruleNote[$Id] = "Zaliczony warunkowo (ustawienie tylko w GPO podlinkowanych do: $((@($Ok | ForEach-Object { $_.Zakres }) | Sort-Object -Unique) -join '; ') - sprawdzić, czy obejmują wszystkie komputery)"
+                  } elseif ($dom.Count -and -not $full.Count) {
+                      $ruleNote[$Id] = "Zaliczony warunkowo (GPO domeny z ustawieniem ma ograniczony zakres: $((@($dom | ForEach-Object { "$($_.Gpo) - $($_.Filtr)" }) | Sort-Object -Unique) -join '; ') - sprawdzić, czy obejmuje wszystkie komputery)"
+                  } elseif ($full.Count -and $blockOus.Count -and -not @($full | Where-Object Wymuszone).Count) {
+                      $ruleNote[$Id] = "Zaliczony warunkowo (OU z komputerami blokujące dziedziczenie: $((@($blockOus | Select-Object -First 5) -join ', '))$(if ($blockOus.Count -gt 5) { " (+$($blockOus.Count - 5))" }); łącze GPO do domeny nie jest wymuszone - sprawdzić, czy ustawienie obejmuje te OU)"
                   } elseif (-not @($Ok).Count -and $gpoAllUnread.Count) {
                       $ruleNote[$Id] = "Nierozstrzygnięty ($($gpoAllUnread.Count) GPO nieczytelnych dla konta przeglądu)"
                   } }
@@ -4175,6 +4302,7 @@ if (-not $SkipDCChecks) {
         $rigF  = @($fail | Where-Object Obszar -eq 'Przypisanie praw użytkowników')
         # GPO bez folderu w SYSVOL: wartości "nieustawione" wynikają z braku plików polityki, a nie z jej treści
         $gpoMissing = if ($gpoNoFiles.Count) { " Uwaga: $(($gpoNoFiles.Keys | Sort-Object | ForEach-Object { "GPO '$_' (podlinkowane do $($gpoNoFiles[$_]))" }) -join ', ') nie ma folderu w SYSVOL (albo konto przeglądu nie ma do niego dostępu) - ustawienia z niego nie są stosowane i nie zostały odczytane (patrz D-GPO-SYNC)." } else { '' }
+        if ($gpoDcNotes.Count) { $gpoMissing += " Uwaga do pierwszeństwa GPO: $(@($gpoDcNotes.Values) -join '; ')." }
         $gpoNote = if ($UseWinRM) { 'Wartości odczytano z rejestru i auditpol każdego DC (stan rzeczywisty).' } else { "Wartości odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona); ustawienia lokalne DC mogą się różnić - dokładny stan daje -UseWinRM.$gpoMissing" }
         # Przypisanie praw zawsze z GPO - także przy -UseWinRM
         $rightsNote = "Przypisania praw odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona$(if ($UseWinRM) { ', także przy -UseWinRM' })).$gpoMissing"
@@ -4986,12 +5114,17 @@ function ConvertTo-TrendSvg([string[]]$Labels, [object[]]$Series, [bool[]]$Hollo
 # Wcześniejsze raporty tego klienta i domeny z katalogu wyników + bieżący przebieg; pliki niezgodne lub uszkodzone są pomijane
 $historyPoints = @()
 $historySkipped = 0
+$historyOlder = $false   # są starsze pliki poza limitem -MaxHistoryPoints
 if ($History) {
     $curFile = 'AD_{0}_{1}_{2:yyyyMMdd-HHmm}.json' -f $Klient, $domain.DNSRoot, $now
     $hist = [System.Collections.Generic.List[object]]::new()
     if (Test-Path -LiteralPath $OutDir) {
-        foreach ($f in @(Get-ChildItem -LiteralPath $OutDir -Filter "AD_*_$($domain.DNSRoot)_*.json" -File -ErrorAction SilentlyContinue)) {
+        # Od najnowszych (znacznik czasu na końcu nazwy); po zebraniu limitu starsze pliki nie są już otwierane
+        $histFiles = @(Get-ChildItem -LiteralPath $OutDir -Filter "AD_*_$($domain.DNSRoot)_*.json" -File -ErrorAction SilentlyContinue |
+                       Sort-Object @{ e = { if ($_.BaseName -match '(\d{8}-\d{4})$') { $Matches[1] } else { '' } }; Descending = $true })
+        foreach ($f in $histFiles) {
             if ($f.Name -eq $curFile) { continue }
+            if ($hist.Count -ge $MaxHistoryPoints - 1) { $historyOlder = $true; break }
             try {
                 $j = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
                 $sv = if ($j.SchemaVersion) { "$($j.SchemaVersion)" } else { '1.0' }
@@ -5006,7 +5139,7 @@ if ($History) {
     $cur.Biezacy = $true
     $hist.Add($cur)
     $historyPoints = @($hist | Sort-Object Data)
-    Write-Step "  -History: przeglądy w historii: $($historyPoints.Count)$(if ($historySkipped) { ", pominięte pliki (niezgodne lub uszkodzone): $historySkipped" })" $(if ($historySkipped) { 'Yellow' } else { 'Green' })
+    Write-Step "  -History: przeglądy w historii: $($historyPoints.Count)$(if ($historySkipped) { ", pominięte pliki (niezgodne lub uszkodzone): $historySkipped" })$(if ($historyOlder) { "; starsze przeglądy pominięto (limit -MaxHistoryPoints $MaxHistoryPoints)" })" $(if ($historySkipped) { 'Yellow' } else { 'Green' })
 }
 
 $invDomain = @(
@@ -5303,6 +5436,7 @@ if ($History) {
             [void]$sb.Append("<td>$($q.Wynik)</td><td>$(HtmlEnc $q.Klasa)</td><td>$($q.Critical)</td><td>$($q.High)</td><td>$($q.Medium)</td><td>$($q.Low)</td><td>$(& $pctTxt $q.CIS)</td><td>$(& $pctTxt $q.MS)</td></tr>")
         }
         [void]$sb.Append('</table>')
+        if ($historyOlder) { [void]$sb.Append("<p class=`"note`">Historia obejmuje $($historyPoints.Count) najnowszych przeglądów (limit -MaxHistoryPoints); starsze raporty z katalogu wyników pominięto.</p>") }
         if ($historySkipped) { [void]$sb.Append("<p class=`"note`">Pominięte pliki JSON (uszkodzone lub z niezgodną wersją schematu): $historySkipped.</p>") }
     }
     [void]$sb.Append('</section>')

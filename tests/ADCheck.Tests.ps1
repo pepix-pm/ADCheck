@@ -4,11 +4,11 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg', 'ConvertFrom-GpLink', 'Get-GpoApplyOrder', 'Get-GpoApplySids', 'Test-GpoSecurityFilter'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
-    $vars = 'dcMethodWinRM', 'dcMethodGpo', 'aclGuid', 'win11Builds', 'win10Ltsc', 'serverEol', 'serverBuilds', 'sacBuilds', 'legacyClient'
+    $vars = 'dcMethodWinRM', 'dcMethodGpo', 'aclGuid', 'gpoApplyGuid', 'win11Builds', 'win10Ltsc', 'serverEol', 'serverBuilds', 'sacBuilds', 'legacyClient'
     $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
                    $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] }, $false) |
         Where-Object { $_.Left.VariablePath.UserPath -in $vars } | ForEach-Object { . ([scriptblock]::Create($_.Extent.Text)) }
@@ -396,5 +396,64 @@ Describe 'Historia przeglądów' {
         ([regex]::Matches($svg, '<polyline')).Count | Should -Be 1
         ([regex]::Matches($svg, '<circle')).Count | Should -Be 2
         $svg | Should -Match 'fill="#fff"'
+    }
+}
+
+Describe 'Pierwszeństwo GPO' {
+    BeforeAll {
+        $a = 'cn={A},cn=policies,cn=system,DC=firma,DC=local'
+        $b = 'cn={B},cn=policies,cn=system,DC=firma,DC=local'
+        $c = 'cn={C},cn=policies,cn=system,DC=firma,DC=local'
+        $dom = 'DC=firma,DC=local'; $ou = 'OU=Domain Controllers,DC=firma,DC=local'
+    }
+    It 'ConvertFrom-GpLink: opcje łącza (wyłączone, wymuszone)' {
+        $r = @(ConvertFrom-GpLink "[LDAP://$a;0][LDAP://$b;1][LDAP://$c;2]")
+        $r.Count | Should -Be 3
+        $r[0].Dn | Should -Be $a
+        $r[0].Disabled | Should -BeFalse; $r[0].Enforced | Should -BeFalse
+        $r[1].Disabled | Should -BeTrue
+        $r[2].Enforced | Should -BeTrue; $r[2].Disabled | Should -BeFalse
+        @(ConvertFrom-GpLink '').Count | Should -Be 0
+    }
+    It 'bez flag: domena, potem OU; łącza wyłączone pominięte' {
+        $r = @(Get-GpoApplyOrder @(@{ Dn = $dom; GpLink = "[LDAP://$a;0][LDAP://$c;1]"; Block = $false }, @{ Dn = $ou; GpLink = "[LDAP://$b;0]"; Block = $false }))
+        ($r.Dn -join '|') | Should -Be "$a|$b"
+    }
+    It 'wymuszone łącze domeny wygrywa z GPO na OU' {
+        $r = @(Get-GpoApplyOrder @(@{ Dn = $dom; GpLink = "[LDAP://$a;2]"; Block = $false }, @{ Dn = $ou; GpLink = "[LDAP://$b;0]"; Block = $false }))
+        ($r.Dn -join '|') | Should -Be "$b|$a"
+        $r[1].Enforced | Should -BeTrue
+    }
+    It 'wymuszone na domenie wygrywa z wymuszonym na OU' {
+        $r = @(Get-GpoApplyOrder @(@{ Dn = $dom; GpLink = "[LDAP://$a;2]"; Block = $false }, @{ Dn = $ou; GpLink = "[LDAP://$b;2]"; Block = $false }))
+        ($r.Dn -join '|') | Should -Be "$b|$a"
+    }
+    It 'blokowanie dziedziczenia pomija niewymuszone GPO domeny, wymuszone zostaje' {
+        $r = @(Get-GpoApplyOrder @(@{ Dn = $dom; GpLink = "[LDAP://$a;0][LDAP://$c;2]"; Block = $false }, @{ Dn = $ou; GpLink = "[LDAP://$b;0]"; Block = $true }))
+        ($r.Dn -join '|') | Should -Be "$b|$c"
+    }
+    It 'Test-GpoSecurityFilter: wszystkie, żadne, część, nieustalone' {
+        $dc1 = [string[]]@('S-1-5-21-1-1001', 'S-1-5-21-1-516', 'S-1-5-11')
+        $dc2 = [string[]]@('S-1-5-21-1-1002', 'S-1-5-21-1-516', 'S-1-5-11', 'S-1-5-21-1-2000')
+        Test-GpoSecurityFilter @('S-1-5-11') @() @($dc1, $dc2) | Should -Be 'Tak'
+        Test-GpoSecurityFilter @('S-1-5-21-1-515') @() @($dc1, $dc2) | Should -Be 'Nie'
+        Test-GpoSecurityFilter @('S-1-5-21-1-2000') @() @($dc1, $dc2) | Should -Be 'Czesc'
+        Test-GpoSecurityFilter @('S-1-5-11') @('S-1-5-21-1-516') @($dc1, $dc2) | Should -Be 'Nie'
+        Test-GpoSecurityFilter @('S-1-5-11') @() @($dc1, $null) | Should -Be '?'
+        Test-GpoSecurityFilter @('S-1-5-11') @() @() | Should -Be '?'
+        Test-GpoSecurityFilter @('S-1-5-11') @() @(, $dc1) | Should -Be 'Tak'
+    }
+    It 'Get-GpoApplySids: Apply Group Policy z ACE zezwolenia i odmowy' {
+        $sd = New-Object System.DirectoryServices.ActiveDirectorySecurity
+        $R = [System.DirectoryServices.ActiveDirectoryRights]
+        $au = [System.Security.Principal.SecurityIdentifier]'S-1-5-11'
+        $g  = [System.Security.Principal.SecurityIdentifier]'S-1-5-21-1-2-3-1105'
+        $T = [System.Security.AccessControl.AccessControlType]
+        $sd.AddAccessRule((New-Object System.DirectoryServices.ActiveDirectoryAccessRule $au, $R::ExtendedRight, $T::Allow, $gpoApplyGuid))
+        $sd.AddAccessRule((New-Object System.DirectoryServices.ActiveDirectoryAccessRule $au, $R::GenericRead, $T::Allow))
+        $sd.AddAccessRule((New-Object System.DirectoryServices.ActiveDirectoryAccessRule $g, $R::ExtendedRight, $T::Deny, $gpoApplyGuid))
+        $f = Get-GpoApplySids $sd
+        $f.Allow | Should -Be @('S-1-5-11')
+        $f.Deny | Should -Be @('S-1-5-21-1-2-3-1105')
     }
 }

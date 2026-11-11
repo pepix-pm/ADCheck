@@ -35,9 +35,10 @@ clear
 | `-OutDir` | Katalog wyników (domyślnie `.\raporty` obok skryptu; przy uruchomieniu z GitHuba `%USERPROFILE%\ADCheck\raporty`) |
 | `-StaleDays` | Próg nieaktywności kont w dniach (domyślnie 90) |
 | `-Previous` | JSON z poprzedniego przeglądu do porównania |
-| `-History` | Sekcja „Historia przeglądów”: wykres wyników i zgodności DC ze wszystkich raportów JSON tego klienta i domeny w katalogu `-OutDir` (od v0.30) |
+| `-History` | Sekcja „Historia przeglądów”: wykres wyników i zgodności DC z raportów JSON tego klienta i domeny w katalogu `-OutDir` – najnowsze, do limitu `-MaxHistoryPoints` (od v0.30) |
 | `-UseWinRM` | Testy DC na podstawie rzeczywistej konfiguracji (rejestr, `auditpol`, dziennik Security) odczytanej przez WinRM; wymaga członkostwa w grupie Administrators domeny |
 | `-SkipDCChecks` | Pomija testy kontrolerów domeny |
+| `-MaxHistoryPoints` | Największa liczba przeglądów w sekcji „Historia przeglądów” – najnowsze, razem z bieżącym (domyślnie 24; od v0.31) |
 | `-MaxRows` | Maksymalna liczba obiektów na znalezisko w HTML (domyślnie 500; pełna lista w CSV) |
 | `-Silent` | Bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików (do automatyzacji) |
 
@@ -273,7 +274,7 @@ Wybrane kontrole CIS Microsoft Windows Server Benchmark (profil L1, kontroler do
 | Zasady audytu | `audit.csv` w GPO | `auditpol /get /category:*` na każdym DC |
 | Przypisanie praw użytkowników | `GptTmpl.inf` w GPO | `GptTmpl.inf` w GPO – także przy `-UseWinRM` (odczyt rzeczywistych przypisań wymagałby zapisu pliku na DC, a skrypt działa tylko w trybie odczytu) |
 
-Ustawienie nieobecne w GPO oceniane jest według wartości domyślnej systemu; jeśli domyślna jest niezgodna z CIS – jako niezgodne. Kolejność GPO jak w pozostałych testach: domena, potem OU Domain Controllers, wg kolejności łączy; flaga Enforced i filtrowanie zabezpieczeń/WMI nie są uwzględniane. Listy kontroli są w skrypcie (`$cisReg`, `$cisAudit`, `$cisRights`).
+Ustawienie nieobecne w GPO oceniane jest według wartości domyślnej systemu; jeśli domyślna jest niezgodna z CIS – jako niezgodne. Pierwszeństwo GPO jak w pozostałych testach DC (od v0.31): łącza zwykłe od domeny do OU Domain Controllers wg kolejności łączy, potem łącza wymuszone (Enforced – wyższy poziom wygrywa); blokowanie dziedziczenia na OU pomija niewymuszone GPO domeny; GPO, którego filtrowanie zabezpieczeń nie obejmuje żadnego DC, jest pomijane. GPO z filtrem WMI albo obejmujące tylko część DC jest stosowane z dopiskiem „niepewne” w kolumnie Źródło i uwagą w opisie znaleziska – filtru WMI nie da się ocenić bez DC. GPO podlinkowane do lokacji (site) nie są uwzględniane. Listy kontroli są w skrypcie (`$cisReg`, `$cisAudit`, `$cisRights`).
 
 ## LAPS
 
