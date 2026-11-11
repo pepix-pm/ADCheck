@@ -278,9 +278,20 @@ if ($braki.Count -eq 0) {
         }
         $rde.psbase.Dispose()
         if (-not $rootDse.defaultNamingContext) { throw 'pusta odpowiedź RootDSE' }
+        # RootDSE jest czytelny bez uwierzytelnienia - dopiero odczyt obiektu domeny potwierdza, że DC przyjął poświadczenia konta.
+        # W zdalnej sesji PowerShell (Enter-PSSession, Invoke-Command) bez delegowania poświadczeń ten odczyt daje 0x80072020.
+        $de = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://$Server/" + $rootDse.defaultNamingContext)
+        $ds = New-Object System.DirectoryServices.DirectorySearcher -ArgumentList $de, '(objectClass=*)'
+        try {
+            $ds.SearchScope = [System.DirectoryServices.SearchScope]::Base
+            [void]$ds.PropertiesToLoad.Add('objectSid')
+            $null = $ds.FindOne()
+        } finally { $ds.Dispose(); $de.psbase.Dispose() }
     } catch {
         $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
-        $hint = if ($e.HResult -eq -2147022987) { ' Konto jest zablokowane po zbyt wielu błędnych hasłach - odblokuj je (Unlock-ADAccount) albo poczekaj na koniec blokady.' }
+        $hint = if ($e.HResult -eq -2147016672 -and $PSSenderInfo) { ' Skrypt uruchomiono w zdalnej sesji PowerShell (Enter-PSSession lub Invoke-Command): taka sesja nie przekazuje poświadczeń dalej do kontrolera domeny (podwójny przeskok Kerberos), więc DC odrzuca zapytania LDAP. Uruchom skrypt w sesji RDP lub na konsoli komputera w domenie, albo w zdalnej sesji bezpośrednio na kontrolerze domeny.' }
+                elseif ($e.HResult -eq -2147016672) { ' Kontroler domeny nie przyjął poświadczeń konta (sesja bez poświadczeń sieciowych, np. konto lokalne lub zadanie bez hasła). Uruchom skrypt kontem domenowym zalogowanym interaktywnie albo przez runas /netonly.' }
+                elseif ($e.HResult -eq -2147022987) { ' Konto jest zablokowane po zbyt wielu błędnych hasłach - odblokuj je (Unlock-ADAccount) albo poczekaj na koniec blokady.' }
                 elseif ($e.HResult -eq -2147023570) { ' Sprawdź nazwę konta i hasło - przy runas /netonly hasło jest weryfikowane dopiero przy pierwszym połączeniu z domeną.' }
                 else { ' Wymagany dostęp do kontrolera domeny (TCP 389) i DNS domeny.' }
         $braki.Add("Brak połączenia LDAP z domeną ($Server): $($e.Message.Trim()) (0x$('{0:X8}' -f $e.HResult)).$hint")

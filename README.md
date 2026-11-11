@@ -13,6 +13,8 @@ Tworzy i rozwija [PEPIX](https://pepix.pl) – przeglądy bezpieczeństwa Active
 
 Skrypt sprawdza wymagania na starcie i wypisuje wszystkie braki naraz.
 
+**Nie uruchamiaj skryptu w zdalnej sesji PowerShell** (`Enter-PSSession`, `Invoke-Command`) na komputerze innym niż kontroler domeny. Taka sesja nie przekazuje poświadczeń dalej do DC (podwójny przeskok Kerberos), więc zapytania LDAP kończą się błędem „An operations error occurred”. Uruchom skrypt w sesji RDP lub na konsoli komputera w domenie, ewentualnie w zdalnej sesji bezpośrednio na kontrolerze domeny.
+
 Pojęcia używane w README i raporcie:
 
 - **konto bez uprawnień administracyjnych** (także „zwykłe konto”) – konto użytkownika domeny bez członkostwa w grupach administracyjnych, zwykle tylko w Domain Users;
