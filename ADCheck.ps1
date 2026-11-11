@@ -1303,14 +1303,15 @@ function Get-GppLocalAdmin($Xml) {
 # Niska, gdy część GPO ma niepewny zakres (filtr WMI, filtrowanie zabezpieczeń), nie ma plików w SYSVOL albo jest nieczytelna.
 function Get-DcGpoConfidence {
     $why = @()
-    if ($gpoDcNotes.Count)    { $why += "GPO o niepewnym zakresie lub pominięte: $($gpoDcNotes.Count)" }
+    if ($gpoDcUnsure.Count)   { $why += "GPO o niepewnym zakresie: $($gpoDcUnsure.Count)" }
     if ($gpoNoFiles.Count)    { $why += "GPO bez folderu w SYSVOL: $($gpoNoFiles.Count)" }
     if ($gpoReadErrors.Count) { $why += "GPO lub pliki nieczytelne dla konta przeglądu: $($gpoReadErrors.Count)" }
     if ($why.Count) { @{ C = 'Niska'; N = "wartości z GPO (konfiguracja zamierzona), odczyt niepełny - $($why -join '; '); stan rzeczywisty DC potwierdza -UseWinRM" } }
     else { @{ C = 'Średnia'; N = 'wartości z GPO (konfiguracja zamierzona); stan rzeczywisty DC potwierdza przebieg z -UseWinRM' } }
 }
 # Uwagi o pierwszeństwie i filtrach GPO kontrolerów domeny (do opisów DC-CIS-*): klucz = nazwa GPO lub DN kontenera
-$gpoDcNotes = [ordered]@{}
+$gpoDcNotes  = [ordered]@{}   # ustalenia: blokowanie dziedziczenia, GPO pominięte przez filtrowanie zabezpieczeń (bez wpływu na pewność)
+$gpoDcUnsure = [ordered]@{}   # niepewność: filtr WMI, filtrowanie obejmujące część DC lub nieustalone, uprawnienia nieodczytane
 $gpoDcCache = @{}
 # GPO obejmujące DC w kolejności stosowania (późniejszy wygrywa): displayName, gPCFileSysPath, Zrodlo; błędy trafiają do $gpoReadErrors
 function Get-DcLinkedGpo {
@@ -1367,7 +1368,7 @@ function Get-DcLinkedGpo {
             if ($res -eq 'Czesc') { $unsure.Add('filtrowanie zabezpieczeń obejmuje tylko część DC') }
             elseif ($res -eq '?') { $unsure.Add('filtrowanie zabezpieczeń nieustalone') }
         } else { $unsure.Add('uprawnienia GPO nieodczytane') }
-        if ($unsure.Count) { $gpoDcNotes[$name] = "GPO '$name' (podlinkowane do $place): $($unsure -join ', ') - nie da się potwierdzić, że jego ustawienia obejmują wszystkie DC" }
+        if ($unsure.Count) { $gpoDcUnsure[$name] = "GPO '$name' (podlinkowane do $place): $($unsure -join ', ') - nie da się potwierdzić, że jego ustawienia obejmują wszystkie DC" }
         if ($gpo.gPCFileSysPath -and -not (Test-Path -LiteralPath $gpo.gPCFileSysPath)) { $gpoNoFiles[$name] = $place }
         $tag = @($(if ($l.Enforced) { 'wymuszone' }), $(if ($unsure.Count) { "niepewne: $($unsure -join ', ')" })) | Where-Object { $_ }
         $list.Add([pscustomobject]@{ displayName = $name; gPCFileSysPath = $gpo.gPCFileSysPath; Zrodlo = "GPO: $name$(if ($tag) { " ($($tag -join '; '))" })" })
@@ -4621,11 +4622,13 @@ if (-not $SkipDCChecks) {
         $rigF  = @($fail | Where-Object Obszar -eq 'Przypisanie praw użytkowników')
         # GPO bez folderu w SYSVOL: wartości "nieustawione" wynikają z braku plików polityki, a nie z jej treści
         $gpoMissing = if ($gpoNoFiles.Count) { " Uwaga: $(($gpoNoFiles.Keys | Sort-Object | ForEach-Object { "GPO '$_' (podlinkowane do $($gpoNoFiles[$_]))" }) -join ', ') nie ma folderu w SYSVOL (albo konto przeglądu nie ma do niego dostępu) - ustawienia z niego nie są stosowane i nie zostały odczytane (patrz D-GPO-SYNC)." } else { '' }
-        if ($gpoDcNotes.Count) { $gpoMissing += " Uwaga do pierwszeństwa GPO: $(@($gpoDcNotes.Values) -join '; ')." }
+        if ($gpoDcUnsure.Count) { $gpoMissing += " Uwaga do pierwszeństwa GPO: $(@($gpoDcUnsure.Values) -join '; ')." }
+        # Ustalenia bez wpływu na wynik (GPO pominięte, blokowanie dziedziczenia) - tylko w DC-CIS-SUMMARY, żeby nie powtarzać ich w każdym znalezisku
+        $gpoInfo = if ($gpoDcNotes.Count) { " Pierwszeństwo GPO: $(@($gpoDcNotes.Values) -join '; ')." } else { '' }
         $gpoNote = if ($UseWinRM) { 'Wartości odczytano z rejestru i auditpol każdego DC (stan rzeczywisty).' } else { "Wartości odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona); ustawienia lokalne DC mogą się różnić - dokładny stan daje -UseWinRM.$gpoMissing" }
         # Przypisanie praw zawsze z GPO - także przy -UseWinRM
         $rightsNote = "Przypisania praw odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona$(if ($UseWinRM) { ', także przy -UseWinRM' })).$gpoMissing"
-        $summaryNote = if ($UseWinRM) { "Opcje zabezpieczeń, szablony administracyjne i audyt odczytano z rejestru i auditpol każdego DC (stan rzeczywisty); przypisania praw - z GPO (konfiguracja zamierzona).$gpoMissing" } else { $gpoNote }
+        $summaryNote = if ($UseWinRM) { "Opcje zabezpieczeń, szablony administracyjne i audyt odczytano z rejestru i auditpol każdego DC (stan rzeczywisty); przypisania praw - z GPO (konfiguracja zamierzona).$gpoMissing$gpoInfo" } else { "$gpoNote$gpoInfo" }
 
         $gpoConf = Get-DcGpoConfidence                                              # przypisania praw: zawsze z GPO
         $regConf = if ($UseWinRM) { @{ C = 'Wysoka'; N = '' } } else { $gpoConf }   # rejestr i audyt: z -UseWinRM stan rzeczywisty
@@ -5089,7 +5092,12 @@ if (-not $SkipDCChecks) {
             $ruleNote['DC-TIME-SOURCE'] = 'Nierozstrzygnięty (brak odpowiedzi NTP z PDC)'
         } else {
             $w32 = ''
-            if ($UseWinRM) {
+            $onPdc = ("$pdc" -ieq "$env:COMPUTERNAME") -or ("$pdc" -like "$env:COMPUTERNAME.*")
+            if ($onPdc) {
+                # przegląd na samym PDC: źródło czasu z w32tm bez WinRM (odczyt nie wymaga uprawnień administratora)
+                try { $w32 = "$((& w32tm.exe /query /source 2>$null) -join ' ')".Trim() } catch { $w32 = '' }
+                if ($LASTEXITCODE) { $w32 = '' }
+            } elseif ($UseWinRM) {
                 try { $w32 = "$(Invoke-Command -ComputerName $pdc -ErrorAction Stop -ScriptBlock { (& w32tm.exe /query /source 2>$null) -join ' ' })".Trim() } catch { $w32 = '' }
             }
             $issue = Get-NtpSourceIssue $ntp
@@ -5289,6 +5297,7 @@ $ruleStatus = @(foreach ($r in $ruleCatalog) {
     $st = if ($f) { 'Znalezisko' }
           elseif (-not (Test-CheckSelected $r.C)) { 'Pominięty (-IncludeCheck / -ExcludeCheck)' }
           elseif ($r.W -and $SkipDCChecks) { 'Pominięty (-SkipDCChecks)' }
+          elseif ("$($ruleNote[$r.Id])" -like 'Nie dotyczy*') { $ruleNote[$r.Id] }
           elseif ($r.W -eq 'WinRM' -and -not $UseWinRM) { 'Wymaga -UseWinRM' }
           elseif ($runAsPriv -and $r.Id -in @('DC-NETSESSION', 'C-LAPS-READABLE')) { 'Pominięty (konto uprzywilejowane)' }
           elseif (($errChecks -contains $r.C) -or ($r.C -eq 'DC-PROBE' -and $probeErr)) { 'Błąd testu' }
@@ -5992,7 +6001,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 [void]$sb.Append('Przegląd wykonano narzędziem ADCheck na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
 [void]$sb.Append('Punktacja: Critical 25, High 10, Medium 3, Low 1 pkt za znalezisko; wynik obszaru to suma punktów (maks. 100; przy przekroczeniu raport podaje też pełną sumę), wynik ogólny to najgorszy obszar. Klasa ekspozycji (A-E) wynika z najpoważniejszego znaleziska (Critical = E, High = D, Medium = C, Low = B, brak = A) i opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa organizacji. ')
 [void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) oraz z Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller) - nie jest to pełna ocena zgodności z żadnym z nich. ')
-[void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder, GPO domeny/DC oraz konta i grupy uprzywilejowane, konta DC i OU Domain Controllers, a w usługach certyfikatów (AD CS) - szablony, obiekty PKI i ustawienia CA (bez rejestru DC i HTTPS z EPA) - ani stacji końcowych. ')
+[void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder, GPO domeny/DC oraz konta i grupy uprzywilejowane, konta DC i OU Domain Controllers, a w usługach certyfikatów (AD CS) - szablony, obiekty PKI i ustawienia CA (rejestr DC - ESC10 - tylko z -UseWinRM; bez HTTPS z EPA) - ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")
 [void]$sb.Append('Wartości odczytane z GPO opisują konfigurację zamierzoną; ustawienia lokalne na DC mogą się od niej różnić. Polecenia naprawcze są przykładowe: przed wykonaniem należy sprawdzić ich skutki w środowisku testowym i wprowadzać je zgodnie z zasadami zarządzania zmianami w organizacji.')
