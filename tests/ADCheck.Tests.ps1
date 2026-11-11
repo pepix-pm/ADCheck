@@ -105,6 +105,19 @@ Describe 'ConvertFrom-AuditpolCsv' {
         $r[0].S | Should -Be 'Sukces i niepowodzenie'
         ConvertFrom-AuditText $r[1].S | Should -Be 1
     }
+    It 'czyta układ 6 kolumn (bez kolumny Subsystem) i wartości w cudzysłowach' {
+        $lines = @(
+            'Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting'
+            'DC01,System,Credential Validation,{0CCE923F-69AE-11D9-BED3-505054503030},Success and Failure,'
+            '"DC01","System","Logon","{0CCE9215-69AE-11D9-BED3-505054503030}","No Auditing",""'
+        )
+        $r = @(ConvertFrom-AuditpolCsv $lines)
+        $r.Count | Should -Be 2
+        $r[0].G | Should -Be '0cce923f-69ae-11d9-bed3-505054503030'
+        ConvertFrom-AuditText $r[0].S | Should -Be 3
+        $r[1].S | Should -Be 'No Auditing'
+        ConvertFrom-AuditText $r[1].S | Should -Be 0
+    }
     It 'pomija wiersze bez GUID i pusty wynik' {
         @(ConvertFrom-AuditpolCsv @('Machine Name,Policy Target,Subsystem,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting', 'DC01,System,,X,,Success,')).Count | Should -Be 0
         @(ConvertFrom-AuditpolCsv @()).Count | Should -Be 0

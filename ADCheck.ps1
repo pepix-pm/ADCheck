@@ -1670,12 +1670,21 @@ function ConvertFrom-AuditText([string]$Text) {
     $v
 }
 
-# Wynik auditpol /get /category:* /r -> obiekty G (GUID podkategorii), S (ustawienie). Kolumny po pozycji (5. GUID, 6. ustawienie),
-# bo nagłówki CSV mogą być w języku systemu DC; wiersze bez GUID są pomijane.
+# Wynik auditpol /get /category:* /r -> obiekty G (GUID podkategorii), S (ustawienie). Kolumnę GUID rozpoznaje po treści,
+# a ustawienie to kolejna kolumna: nagłówki bywają w języku systemu DC, a liczba kolumn różni się między wersjami Windows
+# (6 kolumn: Machine Name, Policy Target, Subcategory, Subcategory GUID, ...; starsze opisy podają też Subsystem). Wiersze bez GUID są pomijane.
 function ConvertFrom-AuditpolCsv([string[]]$Lines) {
-    $rows = @($Lines | Where-Object { "$_".Trim() } | Select-Object -Skip 1 |
-        ConvertFrom-Csv -Header 'Komputer', 'Cel', 'Podsystem', 'Podkategoria', 'G', 'S', 'Wylaczenie')
-    @($rows | Where-Object { "$($_.G)" -match '^\{?[0-9a-fA-F]{8}-' } | ForEach-Object { [pscustomobject]@{ G = "$($_.G)".Trim('{', '}').ToLower(); S = "$($_.S)" } })
+    $hdr  = @(1..12 | ForEach-Object { "K$_" })
+    $rows = @($Lines | Where-Object { "$_".Trim() } | ConvertFrom-Csv -Header $hdr)
+    foreach ($r in $rows) {
+        $v = @($hdr | ForEach-Object { "$($r.$_)".Trim() })
+        for ($i = 0; $i -lt $v.Count - 1; $i++) {
+            if ($v[$i] -match '^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$') {
+                [pscustomobject]@{ G = $v[$i].Trim('{', '}').ToLower(); S = $v[$i + 1] }
+                break
+            }
+        }
+    }
 }
 
 function Get-TopSeverity($Rows) {
@@ -4546,6 +4555,7 @@ if (-not $SkipDCChecks) {
 
         # Cele oceny: przy -UseWinRM każdy DC osobno (rejestr + auditpol), inaczej jeden zestaw z GPO dla wszystkich DC
         $targets = [System.Collections.Generic.List[object]]::new()
+        $auditFromGpo = @{}   # DC, dla których audyt oceniono z GPO mimo -UseWinRM (auditpol bez wyniku)
         if ($UseWinRM) {
             $paths = [string[]]@(@($cisReg) + @($msOnly) | ForEach-Object { "$($_.P)|$($_.V)" })
             foreach ($dc in $dcs) {
@@ -4608,14 +4618,17 @@ if (-not $SkipDCChecks) {
             foreach ($a in $cisAudit) {
                 $guid = "$($a.G)-69ae-11d9-bed3-505054503030"
                 $msE  = if ($msAuditOverride.ContainsKey($a.N)) { $msAuditOverride[$a.N] } else { $a.E }
-                if ($t.Tryb -eq 'WinRM') {
+                if ($t.Tryb -eq 'WinRM' -and @($t.Audit).Count) {
                     $line = $t.Audit | Where-Object { $_.G -eq $guid } | Select-Object -First 1
                     $val = if ($line) { ConvertFrom-AuditText $line.S } else { $null }
-                    $src = if (@($t.Audit).Count) { 'auditpol (WinRM)' } else { 'auditpol (WinRM) - nie odczytano podkategorii; sprawdź auditpol /get /category:* /r na DC' }
+                    $src = if ($line) { 'auditpol (WinRM)' } else { 'auditpol (WinRM) - brak podkategorii w wyniku' }
                 } else {
+                    # Bez -UseWinRM albo gdy auditpol na DC nie zwrócił podkategorii: konfiguracja zamierzona z GPO tego DC
+                    if (-not $t.Policy) { $t.Policy = Get-DcGpoPolicy "$($t.DC)"; $auditFromGpo[$t.DC] = $true }
                     $g = $t.Policy.Audit[$guid]
                     $val = if ($g) { $g.Wartosc } else { $null }
                     $src = if ($g) { $g.Zrodlo } elseif ($t.Policy.Audit.Count) { 'brak w GPO' } else { 'brak zaawansowanych zasad audytu w GPO' }
+                    if ($t.Tryb -eq 'WinRM') { $src = "$src (auditpol przez WinRM nie zwrócił podkategorii - wartość z GPO)" }
                 }
                 $row = [pscustomobject]@{
                     Ustawienie = $a.N; DC = $t.DC; Obszar = 'Zasady audytu'
@@ -4684,9 +4697,13 @@ if (-not $SkipDCChecks) {
             Recommendation = 'Ustawienia wprowadzać w GPO podlinkowanym do OU Domain Controllers (nie w Default Domain Policy), etapami i po teście. Punktem wyjścia może być Microsoft Security Baseline dla DC (Security Compliance Toolkit). Zmiany SMB signing, Kerberos AES-only i LSA Protection wymagają wcześniejszej weryfikacji zgodności aplikacji.'
             Fix = (Fx '# GPMC > GPO dla OU Domain Controllers > Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options', '# oraz Administrative Templates (ścieżki: nazwy ustawień w kolumnie Ustawienie)', 'gpresult /h C:\Temp\dc-gpo.html   # na DC: zastosowane ustawienia')
         }
+        $audConf = $regConf
+        if ($UseWinRM -and $auditFromGpo.Count) {
+            $audConf = @{ C = 'Średnia'; N = "auditpol przez WinRM nie zwrócił podkategorii na: $(@($auditFromGpo.Keys | Sort-Object) -join ', ') - dla nich wartości z GPO (konfiguracja zamierzona)" }
+        }
         Add-IfAny @{
             Id = 'DC-CIS-AUDIT'; Category = $catCis; Severity = (Get-TopSeverity $audF)
-            Confidence = $regConf.C; ConfidenceNote = $regConf.N
+            Confidence = $audConf.C; ConfidenceNote = $audConf.N
             Title = 'Zasady audytu DC niezgodne z CIS L1'
             Objects = $audF
             Description = "Brak audytu tych zdarzeń oznacza, że logowania, zmiany grup uprzywilejowanych, zmiany w AD i użycie uprawnień nie zostaną zarejestrowane - SIEM/SOC nie wykryje ataku, a analiza incydentu będzie niemożliwa. $gpoNote"
