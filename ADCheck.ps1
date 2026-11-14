@@ -94,7 +94,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.32'
+$Version = '0.33'
 $jsonSchemaVersion = '1.3'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -1944,8 +1944,9 @@ Invoke-Check 'PRIV' {
     }
     # lastLogonTimestamp replikuje się z opóźnieniem do ok. 14 dni - próg 35 dni jak w typowych narzędziach audytowych
     if ($adm.Enabled -and $adm.LastLogonDate -and $adm.LastLogonDate -gt $now.AddDays(-35)) {
-        # Przegląd uruchomiony tym kontem sam aktualizuje lastLogonTimestamp - świeża data nie dowodzi wtedy innego użycia
-        $admSelf = if ($runAsSid -eq "$dSid-500" -and $adm.LastLogonDate -ge $now.Date.AddDays(-1)) { ' Przegląd uruchomiono kontem Administrator, więc ostatnia data logowania może pochodzić z samego przeglądu - użycie konta potwierdzić w dzienniku Security DC. Kolejne przeglądy uruchamiać kontem imiennym.' } else { '' }
+        # Przegląd uruchomiony tym kontem sam jest jego użyciem. lastLogonTimestamp aktualizuje się tylko, gdy zapisana wartość
+        # jest starsza niż ok. 9-14 dni, więc data z tego okna może pochodzić z sesji przeglądu, choć nie jest dzisiejsza
+        $admSelf = if ($runAsSid -eq "$dSid-500" -and $adm.LastLogonDate -ge $now.Date.AddDays(-14)) { ' Przegląd uruchomiono kontem Administrator, więc ostatnia data logowania może pochodzić z samego przeglądu - użycie konta potwierdzić w dzienniku Security DC. Kolejne przeglądy uruchamiać kontem imiennym.' } else { '' }
         Add-Finding @{
             Id = 'P-ADMLOGIN'; Category = $catPriv; Severity = 'Medium'
             Title = "Wbudowane konto Administrator używane w ostatnich 35 dniach (ostatnio: $(Format-Date $adm.LastLogonDate))"
@@ -2074,7 +2075,7 @@ Invoke-Check 'USERS' {
     Add-IfAny @{
         Id = 'U-PWDNOTREQ'; Category = $catUser; Severity = 'High'
         Title = 'Konta z flagą PASSWD_NOTREQD (hasło niewymagane)'
-        Objects = ($users | Where-Object { $_.userAccountControl -band 0x20 } | ForEach-Object { ConvertTo-UserRow $_ })
+        Objects = ($users | Where-Object { ($_.userAccountControl -band 0x20) -and $_.SID.Value -ne "$dSid-501" } | ForEach-Object { ConvertTo-UserRow $_ })   # Gość: flaga domyślna, zgłasza go U-GUEST
         Description = 'Konto może mieć puste hasło niezależnie od polityki haseł.'
         Recommendation = 'Usunąć flagę i wymusić zmianę hasła.'
         Fix = (Fx 'Set-ADAccountControl -Identity <konto> -PasswordNotRequired $false', 'Set-ADUser -Identity <konto> -ChangePasswordAtLogon $true')
@@ -2111,7 +2112,7 @@ Invoke-Check 'USERS' {
     Add-IfAny @{
         Id = 'U-PNE'; Category = $catUser; Severity = 'Low'
         Title = 'Zwykłe konta z hasłem bez wygasania'
-        Objects = ($users | Where-Object { $_.PasswordNeverExpires -and -not $privSids[$_.SID.Value] } | ForEach-Object { ConvertTo-UserRow $_ })
+        Objects = ($users | Where-Object { $_.PasswordNeverExpires -and -not $privSids[$_.SID.Value] -and $_.SID.Value -ne "$dSid-501" } | ForEach-Object { ConvertTo-UserRow $_ })
         Description = 'Hasła takich kont bywają niezmieniane latami; wyciek z przeszłości nadal działa.'
         Recommendation = 'Ograniczyć do uzasadnionych kont technicznych (najlepiej gMSA); użytkownikom włączyć wygasanie lub MFA i długie hasła.'
         Fix = (Fx 'Set-ADUser -Identity <konto> -PasswordNeverExpires $false')
@@ -2142,7 +2143,7 @@ Invoke-Check 'USERS' {
         Add-Finding @{
             Id = 'U-GUEST'; Category = $catUser; Severity = 'High'; Title = 'Konto Gość jest włączone'
             Objects = (ConvertTo-UserRow $guest)
-            Description = 'Konto Gość umożliwia dostęp bez imiennego uwierzytelnienia.'
+            Description = 'Konto Gość umożliwia dostęp bez imiennego uwierzytelnienia. Domyślnie nie wymaga hasła (PASSWD_NOTREQD) i ma hasło bez wygasania - dlatego nie jest osobno wykazywane w U-PWDNOTREQ i U-PNE.'
             Recommendation = 'Wyłączyć konto Gość.'
             Fix = (Fx 'Disable-ADAccount -Identity ''{SID}-501''')
             Mitre = 'T1078.001'
@@ -4339,7 +4340,7 @@ if (-not $SkipDCChecks) {
         if ($weak.Count -or (-not $sysv.Count -and $legacy -gt 0)) {
             Add-Finding @{
                 Id = 'D-GPO-HARDPATH'; Category = $catDom; Severity = $(if ($weak.Count) { 'Medium' } else { 'Low' })
-                Title = $(if ($weak.Count) { 'GPO osłabia ochronę ścieżek SYSVOL/NETLOGON (Hardened UNC Paths)' } else { "Brak Hardened UNC Paths dla SYSVOL/NETLOGON przy $legacy kontach komputerów ze starszym Windows" })
+                Title = $(if ($weak.Count) { 'GPO osłabia ochronę ścieżek SYSVOL/NETLOGON (Hardened UNC Paths)' } else { "Brak Hardened UNC Paths dla SYSVOL/NETLOGON przy $legacy $(if ($legacy -eq 1) { 'koncie komputera' } else { 'kontach komputerów' }) ze starszym Windows" })
                 Objects = ($(if ($weak.Count) { $weak } else { $hp }) | ForEach-Object $row)
                 Description = 'Komputery pobierają GPO i skrypty logowania z SYSVOL i NETLOGON. Bez wymogu wzajemnego uwierzytelnienia i integralności atakujący w sieci może podsunąć własne zasady lub skrypty (MS15-011, MS15-014) i uruchomić kod z uprawnieniami SYSTEM. Windows 10/11 i Server 2016+ chronią te ścieżki domyślnie, o ile GPO tego nie wyłącza; Windows 7/8.1 i Server 2008/2012 wymagają ustawienia z GPO.'
                 Recommendation = 'Usunąć wartości RequireMutualAuthentication=0 / RequireIntegrity=0 z GPO. Dla starszych systemów ustawić Hardened UNC Paths: \\*\SYSVOL i \\*\NETLOGON = RequireMutualAuthentication=1, RequireIntegrity=1.'

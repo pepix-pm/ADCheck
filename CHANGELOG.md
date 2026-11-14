@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.33 – 2026-11-13
+
+- **P-ADMLOGIN**: uwaga, że przegląd uruchomiono kontem Administrator i data ostatniego logowania może pochodzić z samego przeglądu, pojawia się, gdy ta data mieści się w ostatnich 14 dniach (wcześniej tylko przy dacie z dziś lub wczoraj). lastLogonTimestamp aktualizuje się co ok. 9–14 dni, więc przy kolejnym przeglądzie tym kontem data bywała starsza i uwaga znikała, choć znalezisko nadal mogło wynikać z samego przeglądu.
+- **U-PWDNOTREQ, U-PNE**: włączone konto Gość nie jest już wykazywane – flagi PASSWD_NOTREQD i hasło bez wygasania ma domyślnie, a problem zgłasza U-GUEST (wcześniej jedno konto dawało trzy znaleziska i zawyżało wynik o 11 pkt). Opis U-GUEST to wyjaśnia.
+- D-GPO-HARDPATH: poprawna odmiana w tytule przy jednym koncie komputera.
+
 ## 0.32 – 2026-11-11
 
 - **DC-TIME-SOURCE z `-UseWinRM`**: gdy `w32tm /query /source` na PDC kończy się błędem (np. zatrzymana usługa W32Time), jego komunikat nie jest już traktowany jako źródło czasu – wcześniej trafiał do kolumny ZrodloW32tm, a znalezisko dostawało pewność „Wysoka”. Teraz wynik opiera się na odpowiedzi NTP z pewnością „Średnia”, tak jak przy odczycie lokalnym na PDC.
