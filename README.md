@@ -30,7 +30,8 @@ Tworzy i rozwija [PEPIX](https://pepix.pl) – przeglądy bezpieczeństwa Active
 - Windows 10/11 lub Windows Server z PowerShellem (Windows PowerShell 5.1 lub PowerShell 7)
 - **Bez RSAT i bez instalowania czegokolwiek** – AD jest odczytywane przez LDAP (`System.DirectoryServices`, wbudowane w Windows)
 - Stacja w domenie (lub `-Server`) z dostępem do kontrolerów domeny: LDAP (TCP 389), SMB/SYSVOL (TCP 445), DNS domeny
-- Konto użytkownika domeny bez uprawnień administracyjnych (wystarczy członkostwo w Domain Users). Tryb `-UseWinRM` wymaga konta z grupy Administrators domeny (np. członka Domain Admins) i dostępu WinRM (TCP 5985) do każdego DC
+- Konto użytkownika domeny bez uprawnień administracyjnych (wystarczy członkostwo w Domain Users). Tryb `-UseWinRM` wymaga konta z grupy Administrators domeny (np. członka Domain Admins) i dostępu WinRM (TCP 5985) do każdego DC, a dla testów serwerów (C-SRV-*) – administratora lokalnego i WinRM na serwerach członkowskich
+- Testy serwerów (C-SRV-*) wyliczają udziały aktywnych serwerów przez SMB (TCP 445) – na zwykłym koncie; serwer nieosiągalny trafia do INFO-SRV-AUDIT, a przegląd trwa dalej
 
 Skrypt sprawdza wymagania na starcie i wypisuje wszystkie braki naraz.
 
@@ -59,7 +60,7 @@ clear
 | `-StaleDays` | Próg nieaktywności kont w dniach (domyślnie 90) |
 | `-Previous` | JSON z poprzedniego przeglądu do porównania: nowe i usunięte znaleziska oraz – dla znalezisk obecnych w obu przeglądach – obiekty, które doszły i zniknęły (konta i komputery po SID, od v0.31) |
 | `-History` | Sekcja „Historia przeglądów”: wykres wyników i zgodności DC z raportów JSON tego klienta i domeny w katalogu `-OutDir` – najnowsze, do limitu `-MaxHistoryPoints` (od v0.30) |
-| `-UseWinRM` | Testy DC na podstawie rzeczywistej konfiguracji (rejestr, `auditpol`, dziennik Security) odczytanej przez WinRM; wymaga członkostwa w grupie Administrators domeny |
+| `-UseWinRM` | Testy DC na podstawie rzeczywistej konfiguracji (rejestr, `auditpol`, dziennik Security) odczytanej przez WinRM; wymaga członkostwa w grupie Administrators domeny. Od v0.34 także serwery członkowskie (C-SRV-*): `auditpol`, SACL katalogów udziałów, historia dziennika Security i agenci SIEM |
 | `-SkipDCChecks` | Pomija testy kontrolerów domeny |
 | `-MaxHistoryPoints` | Największa liczba przeglądów w sekcji „Historia przeglądów” – najnowsze, razem z bieżącym (domyślnie 24; od v0.31) |
 | `-IncludeCheck`, `-ExcludeCheck` | Tylko wskazane testy albo wszystkie poza wskazanymi – np. szybki ponowny test po naprawie. Nazwa testu (`ADCS`, `PRIV`, `DC-PROBE`, …; pełna lista: `-ListChecks`) lub Id reguły (`D-ADCS-ESC1` uruchamia cały test `ADCS`); przy uruchomieniu z pliku (`.\ADCheck.ps1`) nazwy podpowiada klawisz TAB. Przegląd częściowy jest oznaczony w raporcie, nie trafia do historii, a jego wyniku nie należy porównywać z pełnym (od v0.31) |
@@ -248,6 +249,9 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-GPO-LLMNR | Medium | Żadne podlinkowane GPO nie wyłącza LLMNR (ustawienie tylko w GPO na OU/lokacji: „Zaliczony warunkowo”) | T1557.001 |
 | D-GPO-HARDPATH | Medium / Low | GPO osłabia Hardened UNC Paths dla SYSVOL/NETLOGON lub ich brak przy starszych systemach | T1557 |
 | D-GPO-PSLOG | Low | Żadne podlinkowane GPO nie włącza Script Block Logging (ustawienie tylko w GPO na OU/lokacji: „Zaliczony warunkowo”) | T1059.001 |
+| C-SRV-FILEAUDIT | High | Aktywne serwery z udziałami dyskowymi (poza udziałami administracyjnymi, SYSVOL, NETLOGON i print$), na których nie da się ustalić, kto otwierał pliki: brak Audit File System (Sukces) albo brak SACL z audytem odczytu – na katalogu udziału lub globalnego SACL plików z GPO. Zwykłe konto: GPO serwera wg jego OU; SACL katalogów tylko z `-UseWinRM` (bez niego: „Zaliczony warunkowo”) | T1039 |
+| C-SRV-SHAREAUDIT | Medium | Serwery z udziałami bez Audit File Share = Success and Failure lub Audit Detailed File Share z Failure (CIS 17.6.1, 17.6.2) | T1135 |
+| C-SRV-SECLOG | High / Medium | Dziennik Security aktywnych serwerów sięga 90 dni wstecz lub mniej, a zdarzenia nie są przekazywane do SIEM (CIS Controls v8, 8.9 i 8.10). `-UseWinRM`: wiek najstarszego zdarzenia, działający agent (Wazuh, Splunk, Elastic, NXLog, Microsoft/Azure Monitor i in.) lub subskrypcja Windows Event Forwarding; High poniżej 30 dni. Bez `-UseWinRM`: rozmiar dziennika z GPO poniżej 196 608 KB bez subskrypcji WEF (serwery członkowskie) | T1070.001 |
 | D-GPO-UNLINKED | Low | GPO bez aktywnych łączy do domeny, OU lub lokacji | – |
 | D-GPO-DEADLINK | Low | Łącza (gPLink) domeny, OU lub lokacji do GPO, które już nie istnieje | – |
 | D-SPN-DUP | Low | Ta sama nazwa SPN na kilku kontach w domenie | T1558.003 |
@@ -336,7 +340,8 @@ Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie je
 - sondy kontrolerów domeny: dostępność portów usług AD, zapytania NTP (UDP 123), potok `\\DC\pipe\spoolss`, wyliczanie sesji SMB (NetSessionEnum), **próbę anonimowego zapytania LDAP**,
 - zapytanie HTTP bez poświadczeń do `http://<serwer CA>/certsrv/` i odczyt konfiguracji CA przez RPC/DCOM (interfejs administracyjny CA, tylko odczyt) – jeśli w lesie jest AD CS,
 - odczyt dziennika zdarzeń DC (bilety Kerberos z DES/RC4), jeśli konto ma do niego dostęp,
-- w trybie `-UseWinRM`: zdalne sesje PowerShell na każdym DC (odczyt rejestru, stanu usług, zasad audytu i dziennika Security).
+- wyliczanie udziałów aktywnych serwerów (NetShareEnum przez SMB),
+- w trybie `-UseWinRM`: zdalne sesje PowerShell na każdym DC i aktywnym serwerze (odczyt rejestru, stanu usług, zasad audytu, SACL katalogów udziałów i dziennika Security).
 
 Te operacje mogą trafić do logów DC i SIEM oraz wywołać alerty (np. Microsoft Defender for Identity: rozpoznanie przez LDAP, wyliczanie sesji SMB) lub zostać zablokowane przez zaporę. Uzgodnij termin przeglądu z właścicielem środowiska i uprzedź zespół monitorujący bezpieczeństwo (SOC).
 

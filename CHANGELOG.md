@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.34 – 2026-11-18
+
+- **Audyt dostępu do plików na serwerach** – nowy test SRV-AUDIT obejmuje aktywne serwery (`operatingSystem` z „Server”, logowanie w okresie `-StaleDays`), także członkowskie. Udziały z danymi wylicza NetShareEnum (SMB, zwykłe konto); konfigurację zamierzoną odczytuje z GPO każdego serwera według OU jego konta (pierwszeństwo, wymuszanie, blokowanie dziedziczenia i filtrowanie zabezpieczeń jak dla DC). Z `-UseWinRM` odczytuje równolegle stan rzeczywisty: `auditpol`, SACL katalogów udziałów, rozmiar i najstarsze zdarzenie dziennika Security oraz działających agentów przekazywania zdarzeń.
+  - **C-SRV-FILEAUDIT** (High): serwer z udziałami bez Audit File System (Sukces) albo bez SACL rejestrującego odczyt – na katalogu udziału lub jako globalny SACL plików w GPO. Bez tego zdarzenie 4663 nie powstaje i po incydencie nie da się ustalić, kto otwierał plik. Bez `-UseWinRM`, gdy zasada jest włączona, a SACL katalogów nieznany: „Zaliczony warunkowo”.
+  - **C-SRV-SHAREAUDIT** (Medium): Audit File Share inne niż Success and Failure lub Audit Detailed File Share bez Failure (CIS 17.6.1, 17.6.2).
+  - **C-SRV-SECLOG** (High / Medium): historia dziennika Security 90 dni lub krótsza bez przekazywania do SIEM (CIS Controls v8, 8.9 i 8.10); High poniżej 30 dni. Bez `-UseWinRM`: rozmiar dziennika z GPO poniżej 196 608 KB bez subskrypcji Windows Event Forwarding.
+  - **INFO-SRV-AUDIT**: serwery, których udziałów lub stanu nie udało się odczytać.
+- Odczyt GPO: globalny SACL plików (Global Object Access Auditing) z `audit.csv`, kategorie audytu (`[Event Audit]`) i rozmiar dziennika (`[Security Log]`) z `GptTmpl.inf`. Odczyt listy GPO wydzielony do wspólnej funkcji dla DC i serwerów – bez zmiany wyników dla DC.
+
 ## 0.33 – 2026-11-13
 
 - **P-ADMLOGIN**: uwaga, że przegląd uruchomiono kontem Administrator i data ostatniego logowania może pochodzić z samego przeglądu, pojawia się, gdy ta data mieści się w ostatnich 14 dniach (wcześniej tylko przy dacie z dziś lub wczoraj). lastLogonTimestamp aktualizuje się co ok. 9–14 dni, więc przy kolejnym przeglądzie tym kontem data bywała starsza i uwaga znikała, choć znalezisko nadal mogło wynikać z samego przeglądu.

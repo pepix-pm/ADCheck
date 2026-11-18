@@ -94,7 +94,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.33'
+$Version = '0.34'
 $jsonSchemaVersion = '1.3'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -212,6 +212,9 @@ $ruleCatalog = @(
     @{ Id = 'D-GPO-LLMNR';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'LLMNR niewyłączony w GPO' }
     @{ Id = 'D-GPO-HARDPATH';    O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'Hardened UNC Paths dla SYSVOL/NETLOGON' }
     @{ Id = 'D-GPO-PSLOG';       O = 'A'; M = 'Audyt';                        C = 'GPO-ALL';      W = 'DC'; T = 'Rejestrowanie bloków skryptów PowerShell' }
+    @{ Id = 'C-SRV-FILEAUDIT';   O = 'A'; M = 'Audyt';                        C = 'SRV-AUDIT';    W = 'DC'; T = 'Serwery z udziałami bez audytu dostępu do plików (Audit File System + SACL)' }
+    @{ Id = 'C-SRV-SHAREAUDIT';  O = 'A'; M = 'Audyt';                        C = 'SRV-AUDIT';    W = 'DC'; T = 'Audyt udziałów na serwerach plików (CIS 17.6.1, 17.6.2)' }
+    @{ Id = 'C-SRV-SECLOG';      O = 'A'; M = 'Audyt';                        C = 'SRV-AUDIT';    W = 'DC'; T = 'Dziennik Security serwerów: do 90 dni historii bez SIEM' }
     @{ Id = 'P-ADMINMAIL';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane z adresem e-mail' }
     @{ Id = 'D-DCSYNC';          O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Prawo replikacji haseł (DCSync) poza DC i adminami' }
     @{ Id = 'D-ACL-DOMAIN';      O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Prawa przejęcia obiektu domeny' }
@@ -255,7 +258,7 @@ $checkLabels = @{
     'SITES' = 'Lokacje i podsieci'; 'DC-MACHINEPWD' = 'Hasła kont komputerów DC'; 'DC-NET' = 'Porty i udziały DC'
     'GPO-SYNC' = 'Spójność GPO (AD / SYSVOL)'; 'DC-DNS' = 'Rekordy DNS kontrolerów'
     'FGPP' = 'Szczegółowe zasady haseł (PSO)'; 'DUPLICATES' = 'Zduplikowane SPN i UPN'; 'GPO-LINKS' = 'GPO bez łączy'; 'TRUSTS' = 'Relacje zaufania'
-    'ADCS' = 'Usługi certyfikatów (AD CS)'
+    'ADCS' = 'Usługi certyfikatów (AD CS)'; 'SRV-AUDIT' = 'Serwery: audyt plików, dziennik Security'
 }
 
 # -ListChecks: lista testów i reguł do -IncludeCheck / -ExcludeCheck - bez połączenia z domeną i bez przeglądu.
@@ -909,6 +912,9 @@ $planMeta = @{
     'D-GPO-LLMNR'      = @(1, 2, 1, 'Razem z wyłączeniem NetBIOS przez DHCP')
     'D-GPO-HARDPATH'   = @(0.5, 2, 1, '')
     'D-GPO-PSLOG'      = @(1, 4, 2, 'Rozmiar dziennika i przekazywanie do SIEM')
+    'C-SRV-FILEAUDIT'  = @(2, 6, 1, 'GPO dla OU serwerów plików i SACL na udziałach; najpierw oszacować liczbę zdarzeń')
+    'C-SRV-SHAREAUDIT' = @(0.5, 1, 1, 'Razem z C-SRV-FILEAUDIT, w tym samym GPO')
+    'C-SRV-SECLOG'     = @(2, 8, 1, 'Agent SIEM (Wazuh) na serwerach i retencja w SIEM co najmniej 90 dni; rozmiar dziennika w GPO')
     'P-ADMINMAIL'      = @(1, 3, 2, 'Wymaga osobnych kont dla administratorów')
     'D-DCSYNC'         = @(1, 4, 1, 'Konto synchronizacji Entra ID zostawić, ale chronić jak Tier 0')
     'D-ACL-DOMAIN'     = @(2, 8, 1, 'Exchange: aktualna CU i Setup /PrepareAD')
@@ -1353,6 +1359,67 @@ function Get-DcGpoConfidence {
 $gpoDcNotes  = [ordered]@{}   # ustalenia: blokowanie dziedziczenia, GPO pominięte przez filtrowanie zabezpieczeń (bez wpływu na pewność)
 $gpoDcUnsure = [ordered]@{}   # niepewność: filtr WMI, filtrowanie obejmujące część DC lub nieustalone, uprawnienia nieodczytane
 $gpoDcCache = @{}
+# Wszystkie GPO domeny (DN małymi literami -> obiekt) jednym wyszukiwaniem: GPO bez prawa odczytu po prostu nie wraca
+# (bezpośrednie wiązanie z takim obiektem daje 0x8007200A)
+function Get-GpoByDn {
+    if ($gpoDcCache.ContainsKey('all')) { return $gpoDcCache['all'] }
+    $all = @{}
+    try {
+        foreach ($g in @(Find-Ldap -SearchBase "CN=Policies,CN=System,$($domain.DistinguishedName)" -Scope OneLevel -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, gPCFileSysPath, flags, gPCWQLFilter, nTSecurityDescriptor -SecurityDescriptor)) {
+            $all["$($g.distinguishedname)".ToLower()] = $g
+        }
+    } catch { $gpoReadErrors['CN=Policies'] = Get-ErrorText $_ }
+    $gpoDcCache['all'] = $all
+    $all
+}
+# GPO stosowane na serwerze członkowskim w kolejności stosowania (późniejszy wygrywa): displayName, gPCFileSysPath, Zrodlo, Niepewne.
+# Łańcuch kontenerów od domeny do OU konta komputera i pierwszeństwo jak dla DC (Get-GpoApplyOrder); filtrowanie zabezpieczeń
+# oceniane dla tego konta ($Tokens: SID konta i jego grup, $null = nieustalone). Lokacje pomijane, jak dla DC.
+$srvGpoLinks = @{}
+$srvGpoGone  = @{}   # DN GPO (małe litery) -> $true, gdy łącze prowadzi do usuniętego GPO (D-GPO-DEADLINK)
+function Get-ServerGpo([string]$ComputerDn, [string[]]$Tokens) {
+    $all = Get-GpoByDn
+    $domDn = "$($domain.DistinguishedName)"
+    $chain = [System.Collections.Generic.List[string]]::new()
+    $c = Get-ParentOU $ComputerDn
+    while ($c -and $c -ine $domDn -and $chain.Count -lt 20) { $chain.Insert(0, $c); $c = Get-ParentOU $c }
+    $chain.Insert(0, $domDn)
+    $containers = [System.Collections.Generic.List[object]]::new()
+    foreach ($cn in $chain) {
+        if (-not $srvGpoLinks.ContainsKey($cn)) {
+            $srvGpoLinks[$cn] = $null
+            try {
+                $o = Get-LdapObject -Identity $cn -Properties gPLink, gPOptions
+                $srvGpoLinks[$cn] = [pscustomobject]@{ Dn = $cn; GpLink = "$($o.gplink)"; Block = ($cn -ine $domDn -and [bool]([int]$o.gpoptions -band 1)) }
+            } catch { $gpoReadErrors["gPLink: $cn"] = Get-ErrorText $_ }
+        }
+        if ($srvGpoLinks[$cn]) { $containers.Add($srvGpoLinks[$cn]) }
+    }
+    foreach ($l in @(Get-GpoApplyOrder $containers.ToArray())) {
+        $k = $l.Dn.ToLower()
+        $gpo = $all[$k]
+        if (-not $gpo) {
+            if (-not $srvGpoGone.ContainsKey($k)) { $srvGpoGone[$k] = [bool](Test-GpoMissing $l.Dn) }
+            if (-not $srvGpoGone[$k]) {
+                $gpoReadErrors[$l.Dn] = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu)'
+                [pscustomobject]@{ displayName = $l.Dn; gPCFileSysPath = ''; Zrodlo = "GPO nieczytelne: $($l.Dn)"; Niepewne = $true }
+            }
+            continue
+        }
+        if ([int]$gpo.flags -band 2) { continue }   # konfiguracja komputera wyłączona
+        $unsure = @()
+        if ("$($gpo.gpcwqlfilter)".Trim()) { $unsure += 'filtr WMI' }
+        if ($gpo.ntsecuritydescriptor -is [System.DirectoryServices.ActiveDirectorySecurity]) {
+            $f = Get-GpoApplySids $gpo.ntsecuritydescriptor
+            $r = Test-GpoSecurityFilter $f.Allow $f.Deny @(, $Tokens)
+            if ($r -eq 'Nie') { continue }
+            if ($r -ne 'Tak') { $unsure += 'filtrowanie zabezpieczeń nieustalone' }
+        } else { $unsure += 'uprawnienia GPO nieodczytane' }
+        $tag = @($(if ($l.Enforced) { 'wymuszone' }), $(if ($unsure.Count) { "niepewne: $($unsure -join ', ')" })) | Where-Object { $_ }
+        [pscustomobject]@{ displayName = "$($gpo.displayName)"; gPCFileSysPath = $gpo.gPCFileSysPath
+                           Zrodlo = "GPO: $($gpo.displayName)$(if ($tag) { " ($($tag -join '; '))" })"; Niepewne = [bool]$unsure.Count }
+    }
+}
 # GPO stosowane na podanym DC (bez parametru: wszystkie GPO obejmujące którykolwiek DC), w kolejności stosowania
 function Get-DcGpoFor([string]$DcHost) {
     @(Get-DcLinkedGpo | Where-Object { -not $DcHost -or -not $_.Dcs -or @($_.Dcs) -contains $DcHost })
@@ -1366,13 +1433,7 @@ function Get-DcGpoProfiles {
 # GPO obejmujące DC w kolejności stosowania (późniejszy wygrywa): displayName, gPCFileSysPath, Dcs ($null = wszystkie DC), Zrodlo; błędy trafiają do $gpoReadErrors
 function Get-DcLinkedGpo {
     if ($gpoDcCache.ContainsKey('list')) { return $gpoDcCache['list'] }
-    # Wszystkie GPO jednym wyszukiwaniem: GPO bez prawa odczytu po prostu nie wraca (bezpośrednie wiązanie z takim obiektem daje 0x8007200A)
-    $all = @{}
-    try {
-        foreach ($g in @(Find-Ldap -SearchBase "CN=Policies,CN=System,$($domain.DistinguishedName)" -Scope OneLevel -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, gPCFileSysPath, flags, gPCWQLFilter, nTSecurityDescriptor -SecurityDescriptor)) {
-            $all["$($g.distinguishedname)".ToLower()] = $g
-        }
-    } catch { $gpoReadErrors['CN=Policies'] = Get-ErrorText $_ }
+    $all = Get-GpoByDn
     # Kontenery od domeny do OU Domain Controllers (zwykle dwa; OU pośrednie tylko po przeniesieniu OU DC)
     $domDn = "$($domain.DistinguishedName)"; $dcOu = "$($domain.DomainControllersContainer)"
     $chain = [System.Collections.Generic.List[string]]::new()
@@ -1531,9 +1592,13 @@ function Resolve-SidName([string]$Sid) {
 
 # Zbiorcza konfiguracja z GPO obejmujących DC (kolejność, pierwszeństwo i filtry: Get-DcLinkedGpo).
 # Registry: 'ścieżka\wartość' (małe litery, bez HKLM) -> {Wartosc, Zrodlo}; Rights: SeXxx -> {Wartosc = SID-y, Zrodlo}; Audit: GUID podkategorii -> {Wartosc 0-3, Zrodlo}
-function Get-DcGpoPolicy([string]$DcHost) {
-    $pol = [pscustomobject]@{ Registry = @{}; Rights = @{}; Audit = @{} }
-    foreach ($gpo in @(Get-DcGpoFor $DcHost)) {
+# Legacy: [Event Audit] (np. AuditObjectAccess) -> {Wartosc 0-3, Zrodlo}; SecLog: [Security Log] (np. MaximumLogSize w KB) -> {Wartosc, Zrodlo};
+# FileSacl: globalny SACL plików (Global Object Access Auditing > File system) -> {Wartosc = SDDL, Zrodlo}
+function Get-DcGpoPolicy([string]$DcHost) { Read-GpoPolicy @(Get-DcGpoFor $DcHost) }
+function Read-GpoPolicy([object[]]$Gpos) {
+    $pol = [pscustomobject]@{ Registry = @{}; Rights = @{}; Audit = @{}; Legacy = @{}; SecLog = @{}; FileSacl = $null }
+    foreach ($gpo in @($Gpos)) {
+        if (-not $gpo.gPCFileSysPath) { continue }
         try {
             $src  = $gpo.Zrodlo
             $root = Join-Path $gpo.gPCFileSysPath 'Machine'
@@ -1552,6 +1617,10 @@ function Get-DcGpoPolicy([string]$DcHost) {
                     } elseif ($sec -eq 'Privilege Rights') {
                         $sids = @($v -split ',' | ForEach-Object { $_.Trim().TrimStart('*') } | Where-Object { $_ } | ForEach-Object { ConvertTo-Sid $_ })
                         $pol.Rights[$k] = [pscustomobject]@{ Wartosc = $sids; Zrodlo = $src }
+                    } elseif ($sec -eq 'Event Audit' -and $v -match '^\d+$') {
+                        $pol.Legacy[$k] = [pscustomobject]@{ Wartosc = [int]$v; Zrodlo = $src }
+                    } elseif ($sec -eq 'Security Log' -and $v -match '^\d+$') {
+                        $pol.SecLog[$k] = [pscustomobject]@{ Wartosc = [int64]$v; Zrodlo = $src }
                     }
                 }
             }
@@ -1565,9 +1634,13 @@ function Get-DcGpoPolicy([string]$DcHost) {
             }
             $csv = Join-Path $root 'Microsoft\Windows NT\Audit\audit.csv'
             if (Test-Path -LiteralPath $csv) {
+                # Wiersz globalnego SACL (MS-GPAC 2.2.3): MachineName,,<typ zasobu>,,,,<SACL w SDDL> - typ w kolumnie Subcategory, bez GUID
                 foreach ($a in @(Import-Csv -LiteralPath $csv)) {
                     $g = "$($a.'Subcategory GUID')".Trim('{', '}').ToLower()
                     if ($g) { $pol.Audit[$g] = [pscustomobject]@{ Wartosc = [int]$a.'Setting Value'; Zrodlo = $src } }
+                    elseif ("$($a.Subcategory)" -match '(?i)file' -and "$($a.'Setting Value')" -match 'S:') {
+                        $pol.FileSacl = [pscustomobject]@{ Wartosc = "$($a.'Setting Value')"; Zrodlo = $src }
+                    }
                 }
             }
         } catch { $gpoReadErrors["$($gpo.displayName) ($($gpo.gPCFileSysPath))"] = Get-ErrorText $_ }
@@ -1725,6 +1798,33 @@ function ConvertFrom-AuditpolCsv([string[]]$Lines) {
             }
         }
     }
+}
+
+# SACL w SDDL (globalny SACL plików z GPO): czy któryś wpis audytu (AU) rejestruje udany (SA) odczyt pliku.
+# Prawa odczytu: FA, FR, GA, GR, CC (= FILE_READ_DATA, 0x1) albo maska szesnastkowa z bitem 0x1, GENERIC_READ lub GENERIC_ALL.
+function Test-SddlAuditRead([string]$Sddl) {
+    foreach ($m in [regex]::Matches("$Sddl", '\(AU;([A-Z]*);([^;]*);')) {
+        if ($m.Groups[1].Value -notmatch 'SA') { continue }
+        $r = $m.Groups[2].Value
+        if ($r -match '^0x([0-9A-Fa-f]+)$') {
+            if ([Convert]::ToInt64($Matches[1], 16) -band (1 + 268435456 + 2147483648)) { return $true }
+            continue
+        }
+        $tok = @([regex]::Matches($r, '..') | ForEach-Object { $_.Value })
+        if (@($tok | Where-Object { $_ -in 'FA', 'FR', 'GA', 'GR', 'CC' }).Count) { return $true }
+    }
+    $false
+}
+# Udział z danymi wg NetShareEnum (typ STYPE_*): dyskowy (młodszy bajt 0), bez udziałów administracyjnych (bit 0x80000000:
+# C$, ADMIN$, IPC$) i systemowych (SYSVOL, NETLOGON, print$). Udziały ukryte zakładane ręcznie (np. Users$) są danymi.
+function Test-DataShare([string]$Name, [int64]$Type) {
+    (($Type -band 255) -eq 0) -and -not ($Type -band 2147483648) -and $Name -notin 'SYSVOL', 'NETLOGON', 'print$'
+}
+# Waga braku historii dziennika Security (CIS Controls v8, zabezpieczenie 8.10: dzienniki audytu przechowywane co najmniej 90 dni).
+# Przy przekazywaniu zdarzeń do SIEM lokalna historia nie jest oceniana. '' = bez znaleziska.
+function Get-SecLogSeverity($Days, [bool]$Forwarded) {
+    if ($Forwarded -or $null -eq $Days -or [int]$Days -gt 90) { return '' }
+    if ([int]$Days -lt 30) { 'High' } else { 'Medium' }
 }
 
 function Get-TopSeverity($Rows) {
@@ -4910,6 +5010,258 @@ if (-not $SkipDCChecks) {
             Title = 'Nie ustalono poziomu poprawek DC'
             Objects = ($invPatch | Where-Object { $_.Stan -eq 'nieznany' } | ForEach-Object { [pscustomobject]@{ DC = $_.DC; Blad = $_.Blad } })
             Description = 'Odczyt zdalnego rejestru nie powiódł się - zwykle zatrzymana usługa Remote Registry na DC lub zapora. Powtórzyć z przełącznikiem -UseWinRM.'
+        }
+    }
+}
+#endregion
+
+#region ---------- serwery: audyt dostępu do plików i dziennik Security ----------
+# Żeby po incydencie ustalić, kto otwierał pliki na udziale, serwer plików potrzebuje: zasady Audit File System (Sukces),
+# SACL rejestrującego odczyt (na folderach udziałów albo globalnego SACL plików z GPO) i dziennika Security sięgającego
+# co najmniej 90 dni wstecz albo przekazywanego do SIEM. Bez tego zostają tylko podłączenia do udziałów (5140), bez nazw plików.
+# Zwykłe konto: aktywne serwery z AD, ich udziały przez NetShareEnum (SMB, TCP 445) i konfiguracja zamierzona z GPO każdego
+# serwera (wg OU konta komputera). -UseWinRM: auditpol, SACL katalogów udziałów (Get-Acl -Audit), rozmiar i najstarsze
+# zdarzenie dziennika Security oraz agenci przekazywania zdarzeń - równolegle na wszystkich serwerach.
+if (-not $SkipDCChecks) {
+    Invoke-Check 'SRV-AUDIT' {
+        $gFs = '0cce921d-69ae-11d9-bed3-505054503030'; $gShare = '0cce9224-69ae-11d9-bed3-505054503030'; $gDet = '0cce9244-69ae-11d9-bed3-505054503030'
+        $aTxt = @{ 0 = 'brak'; 1 = 'Success'; 2 = 'Failure'; 3 = 'Success and Failure' }
+        $dcHosts = @($dcs | ForEach-Object { "$($_.HostName)".ToLower() })
+        $srv = @(Find-Ldap -Properties dNSHostName, operatingSystem -Filter '(&(objectCategory=computer)(operatingSystem=*Server*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))' |
+                 Where-Object { $_.dnshostname -and $_.LastLogonDate -ge $staleDt } | Sort-Object dnshostname)
+        if (-not $srv.Count) {
+            foreach ($i in 'C-SRV-FILEAUDIT', 'C-SRV-SHAREAUDIT', 'C-SRV-SECLOG') { $ruleNote[$i] = 'Nie dotyczy (brak aktywnych serwerów)' }
+            return
+        }
+        # NetShareEnum (poziom 1) działa na zwykłym koncie domenowym
+        if (-not ('PepixNetShare' -as [type])) {
+            Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class PepixNetShare {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct SHARE_INFO_1 { public string netname; public uint type; public string remark; }
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int NetShareEnum(string server, int level, out IntPtr buf, int prefmax, out int read, out int total, ref int resume);
+    [DllImport("netapi32.dll")]
+    static extern int NetApiBufferFree(IntPtr buf);
+    public static int List(string server, List<string> names, List<long> types) {
+        IntPtr b; int r, t, h = 0;
+        int rc = NetShareEnum(server, 1, out b, -1, out r, out t, ref h);
+        if (b != IntPtr.Zero) {
+            if (rc == 0 || rc == 234) {
+                int sz = Marshal.SizeOf(typeof(SHARE_INFO_1));
+                for (int i = 0; i < r; i++) {
+                    SHARE_INFO_1 s = (SHARE_INFO_1)Marshal.PtrToStructure(new IntPtr(b.ToInt64() + (long)i * sz), typeof(SHARE_INFO_1));
+                    names.Add(s.netname); types.Add((long)s.type);
+                }
+            }
+            NetApiBufferFree(b);
+        }
+        return rc;
+    }
+}
+'@
+        }
+
+        $polCache = @{}
+        $items = [System.Collections.Generic.List[object]]::new()
+        foreach ($s in $srv) {
+            $h = "$($s.dnshostname)"
+            $shares = $null; $err = ''
+            if (Test-TcpPort $h 445 1500) {
+                $names = [System.Collections.Generic.List[string]]::new(); $types = [System.Collections.Generic.List[long]]::new()
+                try {
+                    $rc = [PepixNetShare]::List($h, $names, $types)
+                    if ($rc -in 0, 234) { $shares = @(for ($i = 0; $i -lt $names.Count; $i++) { if (Test-DataShare $names[$i] $types[$i]) { $names[$i] } }) }
+                    else { $err = "NetShareEnum: kod $rc" }
+                } catch { $err = "NetShareEnum: $($_.Exception.Message)" }
+            } else { $err = 'SMB (TCP 445) niedostępny ze stacji przeglądu' }
+            $tok = if ($s.SID) { Get-PrincipalGroupSids "$($s.SID)" } else { $null }
+            $gpos = @(Get-ServerGpo "$($s.distinguishedname)" $tok)
+            $sig = (@($gpos | ForEach-Object { $_.Zrodlo }) -join '|')
+            if (-not $polCache.ContainsKey($sig)) { $polCache[$sig] = Read-GpoPolicy $gpos }
+            $items.Add([pscustomobject]@{ Host = $h; IsDc = ($dcHosts -contains $h.ToLower()); Shares = $shares; Err = $err
+                                          Policy = $polCache[$sig]; Unsure = [bool]@($gpos | Where-Object Niepewne).Count; Win = $null })
+        }
+
+        if ($UseWinRM) {
+            $errs = $null
+            $res = @(Invoke-Command -ComputerName @($items | ForEach-Object Host) -ErrorAction SilentlyContinue -ErrorVariable errs -ScriptBlock {
+                $ap = @(auditpol.exe /get /subcategory:'{0CCE921D-69AE-11D9-BED3-505054503030},{0CCE9224-69AE-11D9-BED3-505054503030},{0CCE9244-69AE-11D9-BED3-505054503030}' /r)
+                $sh = @()
+                if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
+                    $sh = @(Get-SmbShare -Special $false -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Name -notin 'SYSVOL', 'NETLOGON', 'print$' } | ForEach-Object {
+                        $share = $_; $st = 'nieodczytany'
+                        try {
+                            # Get-Acl -Audit wymaga SeSecurityPrivilege (administrator); SACL katalogu udziału dziedziczą pliki i podfoldery
+                            $rules = @((Get-Acl -LiteralPath $share.Path -Audit -ErrorAction Stop).GetAuditRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+                            $read  = @($rules | Where-Object { ($_.AuditFlags -band [System.Security.AccessControl.AuditFlags]::Success) -and ([int64]$_.FileSystemRights -band 1) })
+                            $st = if ($read.Count) { 'odczyt' } elseif ($rules.Count) { 'bez odczytu' } else { 'brak' }
+                        } catch { $st = 'nieodczytany' }
+                        [pscustomobject]@{ Name = $share.Name; Sacl = $st }
+                    })
+                }
+                $log = Get-WinEvent -ListLog Security -ErrorAction SilentlyContinue
+                $old = $null
+                try { $old = (Get-WinEvent -LogName Security -MaxEvents 1 -Oldest -ErrorAction Stop).TimeCreated } catch { $old = $null }
+                $fwd = @()
+                $agents = [ordered]@{ WazuhSvc = 'Wazuh'; OssecSvc = 'OSSEC'; nxlog = 'NXLog'; SplunkForwarder = 'Splunk Universal Forwarder'
+                                      'elastic-agent' = 'Elastic Agent'; winlogbeat = 'Winlogbeat'; HealthService = 'Microsoft Monitoring Agent'
+                                      AzureMonitorAgent = 'Azure Monitor Agent'; 'graylog-sidecar' = 'Graylog Sidecar'; 'fluent-bit' = 'Fluent Bit'; datadogagent = 'Datadog Agent'; Snare = 'Snare' }
+                foreach ($k in $agents.Keys) {
+                    $sv = Get-Service -Name $k -ErrorAction SilentlyContinue
+                    if ($sv -and "$($sv.Status)" -eq 'Running') { $fwd += $agents[$k] }
+                }
+                $sm = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\EventLog\EventForwarding\SubscriptionManager' -ErrorAction SilentlyContinue
+                if ($sm -and @($sm.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }).Count) { $fwd += 'Windows Event Forwarding' }
+                [pscustomobject]@{ Audit = $ap; Shares = $sh; MaxB = $log.MaximumSizeInBytes; SizeB = $log.FileSize; Mode = "$($log.LogMode)"; Oldest = $old; Fwd = $fwd }
+            })
+            foreach ($r in $res) {
+                $t = @($items | Where-Object { $_.Host -ieq "$($r.PSComputerName)" })[0]
+                if ($t) { $t.Win = $r }
+            }
+            foreach ($e in @($errs)) {
+                $n = "$($e.TargetObject)"; if (-not $n -and $e.OriginInfo) { $n = "$($e.OriginInfo.PSComputerName)" }
+                $t = @($items | Where-Object { $_.Host -ieq $n })[0]
+                if ($t -and -not $t.Win) { $t.Err = (@($t.Err, "WinRM: $(($e.Exception.Message -split "`n")[0].Trim())") | Where-Object { $_ }) -join '; ' }
+            }
+        }
+
+        # Wartość podkategorii audytu: auditpol (WinRM) albo GPO; GPO bez zaawansowanych zasad audytu - kategoria Object Access ([Event Audit])
+        $auditVal = { param($It, [string]$Guid)
+            if ($It.Win -and @($It.Win.Audit | Where-Object { $_ }).Count) {
+                $line = @(ConvertFrom-AuditpolCsv @($It.Win.Audit) | Where-Object { $_.G -eq $Guid })[0]
+                if ($line) { return [pscustomobject]@{ V = (ConvertFrom-AuditText $line.S); Z = 'auditpol (WinRM)' } }
+            }
+            $g = $It.Policy.Audit[$Guid]
+            if ($g) { return [pscustomobject]@{ V = [int]$g.Wartosc; Z = $g.Zrodlo } }
+            $l = $It.Policy.Legacy['AuditObjectAccess']
+            if ($l -and -not $It.Policy.Audit.Count) { return [pscustomobject]@{ V = [int]$l.Wartosc; Z = "$($l.Zrodlo) (kategoria Object Access)" } }
+            [pscustomobject]@{ V = $null; Z = 'brak w GPO (domyślnie bez audytu)' }
+        }
+        $fmt = { param($V) if ($null -eq $V) { 'nieustawione' } else { $aTxt[[int]$V] } }
+
+        $fileRows = [System.Collections.Generic.List[object]]::new()
+        $shareRows = [System.Collections.Generic.List[object]]::new()
+        $logRows = [System.Collections.Generic.List[object]]::new()
+        $unknown = [System.Collections.Generic.List[object]]::new()
+        $saclUnknown = [System.Collections.Generic.List[string]]::new()
+        $fromGpo = $false; $lowConf = $false
+
+        foreach ($it in $items) {
+            $w = $it.Win
+            $winShares = if ($w) { @($w.Shares | Where-Object { $_ }) } else { @() }   # pusta tablica wraca z WinRM jako null
+            $dataShares = if ($winShares.Count) { @($winShares | ForEach-Object { $_.Name }) } elseif ($null -ne $it.Shares) { @($it.Shares) } else { $null }
+            if ($null -eq $dataShares) { $unknown.Add([pscustomobject]@{ Serwer = $it.Host; Blad = $it.Err }) }
+            elseif ($UseWinRM -and -not $w) { $unknown.Add([pscustomobject]@{ Serwer = $it.Host; Blad = $it.Err }) }
+            $list = if ($dataShares) { "$((@($dataShares | Select-Object -First 8)) -join ', ')$(if ($dataShares.Count -gt 8) { " (+$($dataShares.Count - 8))" })" } else { '' }
+
+            if ($dataShares -and $dataShares.Count) {
+                $fs = & $auditVal $it $gFs; $sh = & $auditVal $it $gShare; $de = & $auditVal $it $gDet
+                if ($fs.Z -notlike 'auditpol*') { $fromGpo = $true; if ($it.Unsure) { $lowConf = $true } }
+                $gs = $it.Policy.FileSacl
+                $gRead = [bool]($gs -and (Test-SddlAuditRead $gs.Wartosc))
+                $noSacl = @(); $unread = @(); $saclTxt = ''
+                if ($gRead) { $saclTxt = "globalny SACL plików z odczytem ($($gs.Zrodlo))" }
+                elseif ($winShares.Count) {
+                    # 'nieodczytany' (Get-Acl -Audit bez skutku) to brak wiedzy, nie brak SACL
+                    $noSacl = @($winShares | Where-Object { $_.Sacl -in 'brak', 'bez odczytu' })
+                    $unread = @($winShares | Where-Object { $_.Sacl -eq 'nieodczytany' })
+                    $saclTxt = if ($noSacl.Count) { 'bez SACL odczytu: ' + ((@($noSacl | Select-Object -First 8 | ForEach-Object { "$($_.Name) ($($_.Sacl))" })) -join ', ') + $(if ($noSacl.Count -gt 8) { " (+$($noSacl.Count - 8))" } else { '' }) }
+                               elseif ($unread.Count) { "SACL nieodczytany: $((@($unread | ForEach-Object { $_.Name })) -join ', ')" }
+                               else { 'SACL odczytu na wszystkich udziałach' }
+                } else { $saclTxt = 'nieznany - SACL folderów odczytuje tylko przebieg z -UseWinRM' }
+                $fsBad = ($null -eq $fs.V) -or -not ([int]$fs.V -band 1)
+                if ($fsBad -or $noSacl.Count) {
+                    $fileRows.Add([pscustomobject]@{ Serwer = $it.Host; Udzialy = $list; AuditFileSystem = (& $fmt $fs.V); SACL = $saclTxt; Zrodlo = $fs.Z })
+                } elseif (-not $gRead -and (-not $winShares.Count -or $unread.Count)) { $saclUnknown.Add($it.Host) }
+                if ($null -eq $sh.V -or ([int]$sh.V -band 3) -ne 3 -or $null -eq $de.V -or -not ([int]$de.V -band 2)) {
+                    $shareRows.Add([pscustomobject]@{ Serwer = $it.Host; Udzialy = $list; AuditFileShare = (& $fmt $sh.V); AuditDetailedFileShare = (& $fmt $de.V)
+                                                      Zrodlo = $(if ($sh.Z -eq $de.Z) { $sh.Z } else { "$($sh.Z); $($de.Z)" }) })
+                }
+            }
+
+            # Dziennik Security: z WinRM rzeczywista historia; bez WinRM rozmiar i Windows Event Forwarding z GPO (DC ocenia DC-CIS-REG)
+            if ($w) {
+                $days = if ($w.Oldest) { [int][math]::Floor(($now - [datetime]$w.Oldest).TotalDays) } else { $null }
+                $sev = Get-SecLogSeverity $days ([bool]@($w.Fwd | Where-Object { $_ }).Count)
+                if ($sev) {
+                    $logRows.Add([pscustomobject]@{
+                        Serwer = $it.Host; HistoriaDni = $(if ($null -ne $days) { $days } else { '?' }); NajstarszeZdarzenie = $(if ($w.Oldest) { Format-Date $w.Oldest } else { '' })
+                        RozmiarMaksMB = [math]::Round([double]$w.MaxB / 1MB); Zapelnienie = $(if ($w.MaxB) { "$([math]::Round(100 * [double]$w.SizeB / [double]$w.MaxB))%" } else { '' })
+                        PoZapelnieniu = $(if ($w.Mode -eq 'Circular') { 'nadpisuje najstarsze' } else { $w.Mode }); Przekazywanie = 'nie wykryto'; Zrodlo = 'dziennik Security (WinRM)'; Waga = $sev })
+                }
+            } elseif (-not $it.IsDc) {
+                $fromGpo = $true; if ($it.Unsure) { $lowConf = $true }
+                $mx = $it.Policy.Registry['software\policies\microsoft\windows\eventlog\security\maxsize']
+                if (-not $mx) { $mx = $it.Policy.SecLog['MaximumLogSize'] }
+                $wef = @($it.Policy.Registry.Keys | Where-Object { $_ -like 'software\policies\microsoft\windows\eventlog\eventforwarding\subscriptionmanager\*' })
+                if (-not $wef.Count -and (-not $mx -or [int64]$mx.Wartosc -lt 196608)) {
+                    $logRows.Add([pscustomobject]@{
+                        Serwer = $it.Host; HistoriaDni = '? (wymaga -UseWinRM)'; NajstarszeZdarzenie = ''
+                        RozmiarMaksMB = $(if ($mx) { [math]::Round([int64]$mx.Wartosc / 1024) } else { '20 (domyślnie, brak w GPO)' }); Zapelnienie = ''; PoZapelnieniu = ''
+                        Przekazywanie = 'brak subskrypcji WEF w GPO (agenci SIEM widoczni tylko z -UseWinRM)'; Zrodlo = $(if ($mx) { $mx.Zrodlo } else { 'brak w GPO' }); Waga = 'Medium' })
+                }
+            }
+        }
+
+        $conf = if (-not $fromGpo) { @{ C = 'Wysoka'; N = '' } }
+                elseif ($lowConf) { @{ C = 'Niska'; N = 'część wartości z GPO (konfiguracja zamierzona), część GPO z filtrem WMI, nieustalonym filtrowaniem lub nieczytelna; stan rzeczywisty: przebieg z -UseWinRM' } }
+                else { @{ C = 'Średnia'; N = 'część wartości z GPO (konfiguracja zamierzona); stan rzeczywisty: przebieg z -UseWinRM' } }
+
+        Add-IfAny @{
+            Id = 'C-SRV-FILEAUDIT'; Category = $catComp; Severity = 'High'
+            Title = 'Serwery z udziałami bez rejestrowania dostępu do plików'
+            Objects = $fileRows; Confidence = $conf.C; ConfidenceNote = $conf.N
+            Description = 'Na tych serwerach nie da się ustalić, kto otworzył, zmienił lub usunął plik na udziale. Zdarzenie 4663 powstaje tylko wtedy, gdy włączona jest zasada Audit File System (Sukces) i plik lub folder ma SACL obejmujący odczyt - przez SACL na folderze udziału albo globalny SACL plików z GPO (Global Object Access Auditing). Sam audyt udziałów (5140, 5145) pokazuje tylko podłączenia i odmowy, bez nazw otwieranych plików. Po podejrzeniu wycieku danych nie ma wtedy materiału, który potwierdzi lub wykluczy dostęp do konkretnego pliku. Kolumna SACL: udziały bez wpisu audytu udanego odczytu albo informacja, że SACL nie został sprawdzony.'
+            Recommendation = 'GPO dla OU serwerów plików: Advanced Audit Policy > Object Access > Audit File System = Success (opcjonalnie Failure). Na katalogach udziałów z danymi (albo globalnie w GPO: Global Object Access Auditing > File system) dodać SACL: Everyone lub Domain Users, Sukces, prawa „Wyświetlanie folderu / odczyt danych”, „Tworzenie plików / zapis danych” i „Usuwanie”, dziedziczony przez podfoldery i pliki. Przed włączeniem oszacować liczbę zdarzeń i zwiększyć dziennik Security albo przekazywać go do SIEM (C-SRV-SECLOG).'
+            Fix = (Fx 'auditpol /get /subcategory:"{0CCE921D-69AE-11D9-BED3-505054503030}"   # na serwerze: Audit File System',
+                      '# GPO: Computer Configuration > Policies > Windows Settings > Security Settings > Advanced Audit Policy Configuration > Object Access > Audit File System = Success',
+                      '# SACL na katalogu udziału (Właściwości > Zabezpieczenia > Zaawansowane > Inspekcja): Everyone, Sukces, odczyt danych / zapis danych / usuwanie, ten folder, podfoldery i pliki',
+                      '(Get-Acl -Path ''D:\Dane'' -Audit).Audit | Format-Table IdentityReference, FileSystemRights, AuditFlags   # weryfikacja SACL')
+            Mitre = 'T1039'
+        }
+        if (-not $fileRows.Count -and $saclUnknown.Count) {
+            $ruleNote['C-SRV-FILEAUDIT'] = "Zaliczony warunkowo (Audit File System włączony, ale SACL folderów udziałów nie odczytano - wymaga -UseWinRM i administratora serwera: $((@($saclUnknown | Select-Object -First 5)) -join ', ')$(if ($saclUnknown.Count -gt 5) { " (+$($saclUnknown.Count - 5))" }))"
+        }
+
+        Add-IfAny @{
+            Id = 'C-SRV-SHAREAUDIT'; Category = $catComp; Severity = 'Medium'
+            Title = 'Serwery z udziałami bez pełnego audytu udziałów'
+            Objects = $shareRows; Confidence = $conf.C; ConfidenceNote = $conf.N
+            Description = 'CIS Microsoft Windows Server Benchmark (17.6.1, 17.6.2) wymaga audytu Audit File Share = Success and Failure (zdarzenie 5140: kto, z jakiego adresu IP i kiedy podłączył się do udziału) oraz Audit Detailed File Share z Failure (5145: odmowy dostępu do plików i folderów na udziale). Bez nich nie widać prób przeglądania udziałów przez osoby bez uprawnień ani źródła połączeń.'
+            Recommendation = 'GPO dla serwerów z udziałami: Advanced Audit Policy > Object Access > Audit File Share = Success and Failure, Audit Detailed File Share = Failure. Detailed File Share z Success generuje bardzo dużo zdarzeń - włączać tylko przy przekazywaniu do SIEM.'
+            Fix = (Fx 'auditpol /get /subcategory:"{0CCE9224-69AE-11D9-BED3-505054503030},{0CCE9244-69AE-11D9-BED3-505054503030}"   # na serwerze',
+                      '# GPO: Advanced Audit Policy Configuration > Object Access > Audit File Share = Success and Failure; Audit Detailed File Share = Failure')
+            Mitre = 'T1135'
+        }
+
+        $hasGpoLog = @($logRows | Where-Object { $_.Zrodlo -ne 'dziennik Security (WinRM)' }).Count -gt 0
+        Add-IfAny @{
+            Id = 'C-SRV-SECLOG'; Category = $catComp; Severity = (Get-TopSeverity $logRows)
+            Title = 'Serwery z historią dziennika Security do 90 dni, bez przekazywania do SIEM'
+            Objects = $logRows
+            Confidence = $(if ($hasGpoLog) { 'Średnia' } else { 'Wysoka' })
+            ConfidenceNote = $(if ($hasGpoLog) { 'bez -UseWinRM: ocena z rozmiaru dziennika w GPO (konfiguracja zamierzona); historii w dniach ani agentów SIEM nie da się odczytać zwykłym kontem' } else { '' })
+            Description = 'CIS Controls v8 (zabezpieczenie 8.10) wymaga przechowywania dzienników audytu przez co najmniej 90 dni, a 8.9 - ich centralnego zbierania. Gdy lokalny dziennik Security sięga 90 dni wstecz lub mniej, zdarzenia muszą trafiać do SIEM (np. Wazuh); inaczej po wykryciu incydentu dowody logowań i dostępu do plików są już nadpisane. Z -UseWinRM kolumna HistoriaDni to wiek najstarszego zdarzenia w dzienniku, a Przekazywanie - wynik wyszukiwania działających agentów (Wazuh, Splunk, Elastic, NXLog, Microsoft/Azure Monitor i in.) i subskrypcji Windows Event Forwarding; High, gdy historia jest krótsza niż 30 dni. Bez -UseWinRM oceniany jest rozmiar dziennika z GPO: CIS (18.9.27.2.2) wymaga co najmniej 196 608 KB, a domyślne 20 MB na serwerze plików z audytem wystarcza zwykle na godziny lub dni. Kontrolery domeny bez -UseWinRM ocenia DC-CIS-REG.'
+            Recommendation = 'Przekazywać dziennik Security wszystkich serwerów do SIEM z retencją co najmniej 90 dni (CIS 8.9, 8.10) - na serwerach zarządzanych agent Wazuh. Niezależnie od SIEM zwiększyć dziennik Security w GPO (Administrative Templates > Windows Components > Event Log Service > Security > Specify the maximum log file size) - co najmniej 196 608 KB, na serwerach plików z audytem dostępu odpowiednio więcej (wielkość dobrać do liczby zdarzeń na dobę).'
+            Fix = (Fx 'Get-WinEvent -ListLog Security | Select-Object MaximumSizeInBytes, FileSize, LogMode   # na serwerze',
+                      '(Get-WinEvent -LogName Security -MaxEvents 1 -Oldest).TimeCreated   # najstarsze zdarzenie',
+                      '# GPO: Computer Configuration > Administrative Templates > Windows Components > Event Log Service > Security > Specify the maximum log file size (KB)',
+                      'Get-Service WazuhSvc   # agent SIEM')
+            Mitre = 'T1070.001'
+        }
+
+        if ($unknown.Count) {
+            Add-Finding @{
+                Id = 'INFO-SRV-AUDIT'; Category = 'Błędy testów'; Severity = 'Info'
+                Title = "Nie sprawdzono udziałów lub stanu $($unknown.Count) serwerów"
+                Objects = $unknown
+                Description = 'Dla tych serwerów nie udało się ustalić listy udziałów (NetShareEnum przez SMB, TCP 445) albo - przy -UseWinRM - odczytać auditpol, SACL i dziennika Security. Reguły C-SRV-* ich nie obejmują albo oceniają je tylko z GPO. Przyczyną bywa zapora, wyłączony serwer z aktywnym kontem albo brak uprawnień administratora na serwerze (WinRM).'
+                Recommendation = 'Powtórzyć przegląd ze stacji, która ma dostęp do serwerów (TCP 445, a z -UseWinRM także TCP 5985), albo sprawdzić serwery ręcznie poleceniami z C-SRV-FILEAUDIT i C-SRV-SECLOG.'
+            }
         }
     }
 }

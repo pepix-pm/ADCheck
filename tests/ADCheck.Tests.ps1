@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg', 'ConvertFrom-GpLink', 'Get-GpoApplyOrder', 'Get-GpoApplySids', 'Test-GpoSecurityFilter', 'Get-CheckKey', 'Resolve-CheckList', 'Compare-FindingObject', 'Get-CertBindingState', 'ConvertFrom-NtpResponse', 'Get-NtpSourceIssue', 'Get-GptLocalAdmin', 'Get-GppLocalAdmin', 'Get-AceDanger', 'Get-TemplateEnrollSid', 'Get-TemplateEscFlag', 'Get-GppPasswordEntry', 'Get-NtpSourceSeverity'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg', 'ConvertFrom-GpLink', 'Get-GpoApplyOrder', 'Get-GpoApplySids', 'Test-GpoSecurityFilter', 'Get-CheckKey', 'Resolve-CheckList', 'Compare-FindingObject', 'Get-CertBindingState', 'ConvertFrom-NtpResponse', 'Get-NtpSourceIssue', 'Get-GptLocalAdmin', 'Get-GppLocalAdmin', 'Get-AceDanger', 'Get-TemplateEnrollSid', 'Get-TemplateEscFlag', 'Get-GppPasswordEntry', 'Get-NtpSourceSeverity', 'Test-SddlAuditRead', 'Test-DataShare', 'Get-SecLogSeverity'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -859,4 +859,35 @@ Describe 'Podpowiedzi TAB dla -IncludeCheck / -ExcludeCheck' {
             @($r | Where-Object { $_.CompletionText -notlike 'D-ADCS-ESC1*' }).Count | Should -Be 0
         }
     }
+}
+
+Describe 'Audyt dostępu do plików na serwerach' {
+    It 'Test-SddlAuditRead: <Sddl> -> <Wynik>' -ForEach @(
+        @{ Sddl = 'S:(AU;SA;FR;;;WD)'; Wynik = $true }
+        @{ Sddl = 'S:(AU;OICISA;FA;;;WD)'; Wynik = $true }
+        @{ Sddl = 'S:(AU;SAFA;CCDC;;;AU)'; Wynik = $true }
+        @{ Sddl = 'S:(AU;SA;0x1;;;WD)'; Wynik = $true }
+        @{ Sddl = 'S:(AU;SA;0x80000000;;;WD)'; Wynik = $true }
+        @{ Sddl = 'S:(AU;FA;FR;;;WD)'; Wynik = $false }
+        @{ Sddl = 'S:(AU;SA;FWSD;;;WD)'; Wynik = $false }
+        @{ Sddl = 'S:(AU;SA;0x10006;;;WD)'; Wynik = $false }
+        @{ Sddl = ''; Wynik = $false }
+    ) { Test-SddlAuditRead $Sddl | Should -Be $Wynik }
+    It 'Test-DataShare: <Name> (<Type>) -> <Wynik>' -ForEach @(
+        @{ Name = 'Dane'; Type = 0; Wynik = $true }
+        @{ Name = 'Users$'; Type = 0; Wynik = $true }
+        @{ Name = 'C$'; Type = 2147483648; Wynik = $false }
+        @{ Name = 'IPC$'; Type = 2147483651; Wynik = $false }
+        @{ Name = 'SYSVOL'; Type = 0; Wynik = $false }
+        @{ Name = 'print$'; Type = 0; Wynik = $false }
+        @{ Name = 'HP-01'; Type = 1; Wynik = $false }
+    ) { Test-DataShare $Name $Type | Should -Be $Wynik }
+    It 'Get-SecLogSeverity: <Days> dni, SIEM <Fwd> -> <Wynik>' -ForEach @(
+        @{ Days = 12; Fwd = $false; Wynik = 'High' }
+        @{ Days = 30; Fwd = $false; Wynik = 'Medium' }
+        @{ Days = 90; Fwd = $false; Wynik = 'Medium' }
+        @{ Days = 91; Fwd = $false; Wynik = '' }
+        @{ Days = 12; Fwd = $true; Wynik = '' }
+        @{ Days = $null; Fwd = $false; Wynik = '' }
+    ) { Get-SecLogSeverity $Days $Fwd | Should -Be $Wynik }
 }
