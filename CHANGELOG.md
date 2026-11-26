@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.35 – 2026-11-26
+
+Poprawki po zewnętrznym przeglądzie kodu.
+
+- **Brak wyniku nie jest już zaliczeniem** – status „Nierozstrzygnięty” albo „Błąd testu” zamiast „Zaliczony”:
+  - **D-GPP-PASSWORD**: niedostępny katalog `Policies` w SYSVOL (błąd testu) oraz nieczytelne podkatalogi lub pliki XML przy braku znalezisk.
+  - **DC-SMB1, DC-SPOOLER, DC-NETSESSION**: sonda bez wyniku na którymkolwiek DC (np. zamknięty TCP 445) przy braku znalezisk.
+  - **D-TRUST-SIDF**: błąd odczytu relacji zaufania (wcześniej cicho traktowany jak brak zaufań); przyczyna w ERR-TRUST-READ.
+  - **DC-KRB-DES-USED, DC-KRB-RC4-USED** (`-UseWinRM`): DC bez odczytu dziennika albo bez żadnych zdarzeń 4768/4769 z ostatnich 7 dni (wyłączony audyt Kerberos, krótka historia dziennika); takie DC są wymienione w DC-KRB-UNKNOWN.
+- **Klasa ekspozycji**: przy braku znalezisk klasa A jest podawana tylko wtedy, gdy żadna reguła nie ma statusu „Błąd testu” ani „Nierozstrzygnięty”; w przeciwnym razie klasa jest nieustalona („?”). Pole `Meta.KlasaEkspozycji` w JSON może mieć wartość `?`.
+- **P-PRIV-MEMBERS** (nowa reguła, Critical / High / Medium): członkowie grup uprzywilejowanych inni niż konta osób – szerokie grupy (Domain Users, Authenticated Users, Domain Computers…), konta komputerów (poza DC), gMSA/sMSA i podmioty spoza domeny. Wcześniej testy grup uprzywilejowanych liczyły tylko konta osób, więc np. Domain Users w Domain Admins dawało „Zaliczony”.
+- **D-PWDREV** (nowa reguła, High): polityka haseł domeny z włączonym szyfrowaniem odwracalnym (`pwdProperties`, bit 0x10).
+- **D-ACL-ADMINSDHOLDER, P-ACL-TIER0, D-ACL-DOMAIN, D-ACL-GPO**: wykrywany jest zapis zweryfikowany członkostwa (AddSelf – prawo dodania samego siebie do grupy), także jako „wszystkie zapisy zweryfikowane”.
+- **D-DSHEURISTICS**: poprawiony warunek dla znaków 28 i 29 – zgłaszana jest wartość 2 (ochrona CVE-2021-42291 wyłączona, KB5008383). Wcześniej zgłaszana była wartość 1, która oznacza tryb wymuszania, a wartość 2 przechodziła bez znaleziska.
+- **`-Klient` ze znakami niedozwolonymi w nazwie pliku** (`\ / : * ? " < > |`, `[ ]`): w nazwach plików wynikowych są zastępowane znakiem `_` (w raporcie nazwa zostaje bez zmian). Wcześniej zapis kończył się błędem po całym przebiegu. Pliki są zapisywane przez `-LiteralPath`, więc `[ ]` w `-OutDir` też nie przeszkadza.
+- **CSV**: wartości tekstowe zaczynające się od `=`, `+`, `-`, `@` (także tabulacji i CR) dostają na początku apostrof – ochrona przed wykonaniem formuły po otwarciu pliku w arkuszu (nazwy i opisy obiektów AD może ustawić każdy, kto ma do nich prawo zapisu).
+- **auditpol z `-UseWinRM` na DC i serwerach w innym języku** (DC-CIS-*, DC-MSBASE, C-SRV-*): rozpoznawane są także ustawienia po niemiecku, francusku, hiszpańsku i włosku; tekst w nierozpoznanym języku nie jest już czytany jako „brak audytu” – audyt jest wtedy oceniany z GPO z obniżoną pewnością, tak jak przy pustym wyniku auditpol.
+- README: pełna lista portów używanych przez testy.
+
 ## 0.34 – 2026-11-18
 
 - **Audyt dostępu do plików na serwerach** – nowy test SRV-AUDIT obejmuje aktywne serwery (`operatingSystem` z „Server”, logowanie w okresie `-StaleDays`), także członkowskie. Udziały z danymi wylicza NetShareEnum (SMB, zwykłe konto); konfigurację zamierzoną odczytuje z GPO każdego serwera według OU jego konta (pierwszeństwo, wymuszanie, blokowanie dziedziczenia i filtrowanie zabezpieczeń jak dla DC). Z `-UseWinRM` odczytuje równolegle stan rzeczywisty: `auditpol`, SACL katalogów udziałów, rozmiar i najstarsze zdarzenie dziennika Security oraz działających agentów przekazywania zdarzeń.

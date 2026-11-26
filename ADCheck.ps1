@@ -94,7 +94,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.34'
+$Version = '0.35'
 $jsonSchemaVersion = '1.3'   # wersja struktury pliku JSON (patrz komentarz przy zapisie JSON)
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -160,6 +160,7 @@ $ruleCatalog = @(
     @{ Id = 'P-ServerOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Server Operators' }
     @{ Id = 'P-PrintOperators';  O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Print Operators' }
     @{ Id = 'P-BackupOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Backup Operators' }
+    @{ Id = 'P-PRIV-MEMBERS';    O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Szerokie grupy, komputery, gMSA i obce podmioty w grupach uprzywilejowanych' }
     @{ Id = 'P-PNE';             O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini z hasłem bez wygasania' }
     @{ Id = 'P-SPN';             O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini z SPN (Kerberoasting)' }
     @{ Id = 'P-DELEG';           O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini bez ochrony przed delegacją' }
@@ -185,6 +186,7 @@ $ruleCatalog = @(
     @{ Id = 'U-SPN';             O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta użytkowników z SPN' }
     @{ Id = 'D-PWDLEN';          O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Minimalna długość hasła < 12' }
     @{ Id = 'D-PWDCPLX';         O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Złożoność haseł wyłączona' }
+    @{ Id = 'D-PWDREV';          O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Hasła odwracalne w polityce haseł domeny' }
     @{ Id = 'D-LOCKOUT';         O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Brak blokady konta' }
     @{ Id = 'DC-SPOOLER';        O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'Print Spooler na DC' }
     @{ Id = 'DC-LDAPSIGN';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'Podpisywanie LDAP niewymagane' }
@@ -552,6 +554,7 @@ function Get-LdapPasswordPolicy {
     [pscustomobject]@{
         MinPasswordLength    = [int]$dObj.minpwdlength
         ComplexityEnabled    = [bool]([int]$dObj.pwdproperties -band 1)
+        ReversibleEncryptionEnabled = [bool]([int]$dObj.pwdproperties -band 0x10)
         MaxPasswordAge       = $(if ($age -eq 0 -or $age -eq [int64]::MinValue) { [TimeSpan]::Zero } else { [TimeSpan]::FromTicks(-$age) })
         PasswordHistoryCount = [int]$dObj.pwdhistorylength
         LockoutThreshold     = [int]$dObj.lockoutthreshold
@@ -863,6 +866,7 @@ $planMeta = @{
     'P-ServerOperators' = @(1, 2, 1, '')
     'P-PrintOperators' = @(1, 2, 1, '')
     'P-BackupOperators' = @(1, 2, 1, 'Sprawdzić, czy grupy nie używa oprogramowanie do kopii')
+    'P-PRIV-MEMBERS'   = @(1, 4, 1, 'Ustalić, co korzysta z członkostwa, przed usunięciem')
     'P-PNE'            = @(2, 4, 1, '')
     'P-SPN'            = @(2, 4, 1, 'Konta usług przenieść na gMSA')
     'P-DELEG'          = @(2, 4, 2, 'Protected Users najpierw na kontach testowych')
@@ -886,6 +890,7 @@ $planMeta = @{
     'U-SPN'            = @(2, 8, 2, 'Migracja kont usług na gMSA')
     'D-PWDLEN'         = @(2, 4, 2, 'Komunikacja do użytkowników; zmiana działa przy kolejnej zmianie hasła')
     'D-PWDCPLX'        = @(1, 2, 2, '')
+    'D-PWDREV'         = @(1, 4, 1, 'Po wyłączeniu wymusić zmianę haseł kont')
     'D-LOCKOUT'        = @(1, 2, 1, '')
     'DC-SPOOLER'       = @(1, 2, 1, 'Sprawdzić, czy DC nie jest serwerem wydruku')
     'DC-LDAPSIGN'      = @(4, 12, 2, 'Najpierw zdarzenia 2889 i poprawa klientów')
@@ -1775,12 +1780,17 @@ function Test-CisValue($Value, [hashtable]$Control) {
     $false
 }
 
-# Tekst "Inclusion Setting" z auditpol /r -> 0 brak, 1 Success, 2 Failure, 3 oba (angielski i polski)
+# Tekst "Inclusion Setting" z auditpol /r -> 0 brak, 1 Success, 2 Failure, 3 oba. Tekst jest w języku systemu DC:
+# rozpoznawane są angielski, polski, niemiecki, francuski, hiszpański i włoski (znaki diakrytyczne jako dowolny znak -
+# strona kodowa konsoli zdalnej sesji bywa inna). Tekst nierozpoznany = $null (brak wiedzy), a nie "brak audytu".
 function ConvertFrom-AuditText([string]$Text) {
+    $t = "$Text".Trim()
     $v = 0
-    if ($Text -match '(?i)(^|\s)(success|sukces|powodz)') { $v = $v -bor 1 }
-    if ($Text -match '(?i)(failure|niepowodz|błąd|błęd)') { $v = $v -bor 2 }
-    $v
+    if ($t -match '(?i)(^|\s)(success|sukces|powodz|erfolg|succ.s|r.ussite|correcto|aciertos?|riuscit|positivo)') { $v = $v -bor 1 }
+    if ($t -match '(?i)(failure|niepowodz|błąd|błęd|fehler|chec|error|negativo)') { $v = $v -bor 2 }
+    if ($v) { return $v }
+    if ($t -match '(?i)^(no auditing|brak|keine|pas d|aucun|sin |nessun)') { return 0 }
+    $null
 }
 
 # Wynik auditpol /get /category:* /r -> obiekty G (GUID podkategorii), S (ustawienie). Kolumnę GUID rozpoznaje po treści,
@@ -1827,6 +1837,27 @@ function Get-SecLogSeverity($Days, [bool]$Forwarded) {
     if ([int]$Days -lt 30) { 'High' } else { 'Medium' }
 }
 
+# Nazwa klienta jako część nazwy pliku: znaki niedozwolone w nazwach plików Windows oraz [ ] (wzorce PowerShella) -> '_'
+function Get-SafeFileName([string]$Name) {
+    $n = ("$Name" -replace '[\\/:*?"<>|\[\]\x00-\x1f]', '_').Trim(' ', '.')
+    if ($n) { $n } else { 'klient' }
+}
+
+# Ochrona CSV przed formułami: arkusz wykonuje komórkę zaczynającą się od = + - @ (także po tabulacji lub CR), a nazwy
+# i opisy obiektów AD może ustawić każdy, kto ma do nich prawo zapisu. Taki tekst dostaje na początku apostrof.
+function ConvertTo-CsvSafe {
+    param([Parameter(ValueFromPipeline)]$Row)
+    process {
+        $o = [ordered]@{}
+        foreach ($p in $Row.PSObject.Properties) {
+            $v = $p.Value
+            if ($v -is [string] -and $v -match '^[=+\-@\t\r]') { $v = "'" + $v }
+            $o[$p.Name] = $v
+        }
+        [pscustomobject]$o
+    }
+}
+
 function Get-TopSeverity($Rows) {
     foreach ($s in 'Critical', 'High', 'Medium', 'Low') { if (@($Rows | Where-Object Waga -eq $s).Count) { return $s } }
     'Low'
@@ -1849,7 +1880,8 @@ Write-Step 'Odczyt danych bazowych (kontrolery domeny, polityka haseł, zaufania
 $dcs = @(Get-LdapDomainControllers)
 $pp  = Get-LdapPasswordPolicy
 $trusts = @()
-try { $trusts = @(Get-LdapTrusts) } catch { $trusts = @() }
+$trustsErr = $null   # błąd odczytu zaufań: D-TRUST-SIDF dostaje status "Nierozstrzygnięty" zamiast zaliczenia
+try { $trusts = @(Get-LdapTrusts) } catch { $trusts = @(); $trustsErr = Get-ErrorText $_ }
 
 # Atrybuty LDAP kont (UAC, SID, pwdLastSet, lastLogonTimestamp, whenCreated pobiera zawsze Find-Ldap)
 $userProps = 'servicePrincipalName','memberOf','adminCount','sIDHistory','msDS-SupportedEncryptionTypes','mail'
@@ -1974,6 +2006,59 @@ Invoke-Check 'PRIV' {
             Fix = (Fx "Remove-ADGroupMember -Identity '$($privGroups[$g])' -Members <konto>")
             Mitre = 'T1078.002'
         }
+    }
+
+    # Członkowie grup uprzywilejowanych niebędący kontami osób. Get-LdapGroupUsers zwraca tylko osoby, więc pozostałe testy ich nie widzą:
+    # szerokie grupy (Domain Users, Authenticated Users...), konta komputerów, konta usług zarządzane (gMSA/sMSA), podmioty spoza domeny (FSP).
+    $broadPriv = @{ 'S-1-1-0' = 'Everyone'; 'S-1-5-7' = 'Anonymous Logon'; 'S-1-5-11' = 'Authenticated Users'; 'S-1-5-4' = 'Interactive'; 'S-1-5-32-545' = 'Users (BUILTIN)'
+                    "$dSid-513" = 'Domain Users'; "$dSid-514" = 'Domain Guests'; "$dSid-515" = 'Domain Computers' }
+    $dcSidSet = @{}; foreach ($d in $dcs) { if ($d.Sid) { $dcSidSet["$($d.Sid)"] = $true } }
+    $npClass = '(|(objectClass=group)(objectCategory=computer)(objectClass=msDS-GroupManagedServiceAccount)(objectClass=msDS-ManagedServiceAccount)(objectClass=foreignSecurityPrincipal))'
+    $npSeen = @{}
+    $npRows = @(foreach ($g in $privGroups.GetEnumerator()) {
+        $go = Get-LdapObject -Identity $g.Value
+        if (-not $go) { continue }
+        $mem = @(Find-Ldap -Filter "(&$npClass(memberOf:1.2.840.113556.1.4.1941:=$(ConvertTo-LdapFilterValue "$($go.distinguishedname)")))")
+        # członkostwo przez grupę podstawową (primaryGroupID) nie trafia do memberOf
+        if ($g.Value -like "$dSid-*") {
+            $rid = $g.Value.Substring($g.Value.LastIndexOf('-') + 1)
+            $mem += @(Find-Ldap -Filter "(&(|(objectCategory=computer)(objectClass=msDS-GroupManagedServiceAccount)(objectClass=msDS-ManagedServiceAccount))(primaryGroupID=$rid))")
+        }
+        foreach ($m in $mem) {
+            if (-not $m.SID) { continue }
+            $sid = $m.SID.Value
+            if ($npSeen.ContainsKey("$($g.Key)|$sid")) { continue }
+            $npSeen["$($g.Key)|$sid"] = $true
+            $cls = "$($m.objectclass)"
+            $typ = ''; $why = ''; $sev = ''
+            if ($broadPriv.ContainsKey($sid)) {
+                $typ = 'szeroka grupa'; $sev = 'Critical'; $why = 'uprawnienia grupy ma każde konto należące do tej tożsamości'
+            } elseif ($cls -eq 'group') {
+                continue   # zwykła grupa zagnieżdżona: jej członków (osoby) obejmują pozostałe testy
+            } elseif ($cls -eq 'foreignSecurityPrincipal') {
+                $typ = 'podmiot spoza domeny'; $sev = 'Medium'; $why = 'konto lub grupa z innej domeny albo tożsamość wbudowana - poza zakresem tego przeglądu'
+            } elseif ($cls -eq 'computer') {
+                if ($dcSidSet.ContainsKey($sid)) { continue }   # kontroler domeny i tak należy do Tier 0
+                $typ = 'konto komputera'; $sev = 'High'; $why = 'lokalny administrator tego komputera (lub przejęta usługa) działa z uprawnieniami grupy'
+            } else {
+                $typ = 'konto usługi zarządzane (gMSA/sMSA)'; $sev = 'High'; $why = 'każdy komputer, który pobiera hasło konta, ma uprawnienia grupy'
+            }
+            [pscustomobject]@{
+                Grupa = $g.Key; Czlonek = $(if ($broadPriv.ContainsKey($sid)) { $broadPriv[$sid] } elseif ($m.samaccountname) { "$($m.samaccountname)" } else { Resolve-SidName $sid })
+                Typ = $typ; Ryzyko = $why; SID = $sid; W = $sev
+            }
+        }
+    })
+    Add-IfAny @{
+        Id = 'P-PRIV-MEMBERS'; Category = $catPriv; Severity = $(if (@($npRows | Where-Object W -eq 'Critical').Count) { 'Critical' } elseif (@($npRows | Where-Object W -eq 'High').Count) { 'High' } else { 'Medium' })
+        Title = 'Szerokie grupy, komputery, konta usług lub obce podmioty w grupach uprzywilejowanych'
+        Objects = ($npRows | Sort-Object @{ e = { @{ Critical = 0; High = 1; Medium = 2 }[$_.W] } }, Grupa, Czlonek | Select-Object Grupa, Czlonek, Typ, Ryzyko, SID)
+        Description = 'Grupy uprzywilejowane zawierają (bezpośrednio lub przez zagnieżdżenie) członków innych niż konta osób. Szeroka grupa (np. Domain Users, Authenticated Users, Domain Computers) oznacza, że uprawnienia administratora ma każde konto w domenie. Konto komputera w takiej grupie daje jej uprawnienia każdemu, kto ma na tym komputerze prawa lokalnego administratora. Konto usługi zarządzane (gMSA) - każdemu serwerowi, który może pobrać jego hasło. Podmiot spoza domeny (konto lub grupa z zaufanej domeny) podlega zasadom i ochronie innej domeny, a jego członków ten przegląd nie widzi. Pozostałe testy kont uprzywilejowanych obejmują tylko konta osób, więc ci członkowie nie pojawiają się na ich listach.'
+        Recommendation = 'Szerokie grupy usunąć natychmiast i sprawdzić, kto i kiedy je dodał (możliwy ślad incydentu). Konta komputerów i gMSA wyjąć z grup uprzywilejowanych, a potrzebne uprawnienia nadać przez delegację na OU; gdy to niemożliwe - chronić te komputery jak kontrolery domeny (Tier 0). Członkostwo podmiotów z innych domen potwierdzić z ich administratorem i ograniczyć do imiennych kont.'
+        Fix = (Fx 'Get-ADGroupMember -Identity ''<SID grupy>'' -Recursive | Where-Object objectClass -ne ''user''   # członkowie inni niż konta osób',
+                  'Remove-ADGroupMember -Identity ''<SID grupy>'' -Members ''<SID z kolumny SID>''   # po weryfikacji',
+                  'repadmin /showobjmeta <DC> "<DN grupy>"   # kiedy zmieniono atrybut member')
+        Mitre = 'T1098.007'
     }
 
     # Group Policy Creator Owners: tworzą GPO i zostają ich właścicielami (pełna edycja); groźne, gdy takie GPO zostanie podlinkowane do domeny lub OU z serwerami
@@ -2515,7 +2600,12 @@ function Get-AceDanger([System.DirectoryServices.ActiveDirectoryAccessRule]$Ace)
         elseif ($ot -eq $aclGuid.Rbcd)     { $why.Add('RBCD (zapis msDS-AllowedToActOnBehalfOfOtherIdentity)') }
         elseif ($ot -eq $aclGuid.Spn)      { $why.Add('zapis SPN (celowany Kerberoasting)') }
     }
-    if (($r -band $R::Self) -and $ot -eq $aclGuid.Spn) { $why.Add('zapis SPN przez zapis zweryfikowany (celowany Kerberoasting)') }
+    if ($r -band $R::Self) {
+        if ($ot -eq $aclGuid.Spn)        { $why.Add('zapis SPN przez zapis zweryfikowany (celowany Kerberoasting)') }
+        elseif ($r -band $R::WriteProperty) { $null = $ot }   # pełny zapis atrybutu zgłoszony wyżej (GenericWrite zawiera bit Self)
+        elseif ($ot -eq $aclGuid.Member) { $why.Add('dodanie siebie do grupy (AddSelf, zapis zweryfikowany member)') }
+        elseif ($ot -eq [guid]::Empty)   { $why.Add('wszystkie zapisy zweryfikowane (w tym dodanie siebie do grupy - AddSelf)') }
+    }
     if ($r -band $R::ExtendedRight) {
         if ($ot -eq [guid]::Empty)                     { $why.Add('wszystkie prawa rozszerzone (w tym DCSync i reset haseł)') }
         elseif ($ot -eq $aclGuid.GetChangesAll)        { $why.Add('replikacja haseł (DS-Replication-Get-Changes-All, DCSync)') }
@@ -2835,7 +2925,7 @@ Invoke-Check 'ACL-TIER0' {
         Title = 'Podmioty spoza administratorów z prawami do kont, grup lub kontrolerów domeny (Tier 0)'
         Objects = $t0Agg
         Detail = $t0Rows
-        Description = 'Na kontach i grupach uprzywilejowanych, kontach komputerów DC lub OU Domain Controllers są wpisy dające prawa podmiotom spoza administratorów: pełną kontrolę, zmianę uprawnień, przejęcie własności, zapis atrybutów, zmianę członkostwa grupy, reset hasła, Shadow Credentials (dodanie własnego klucza do konta i logowanie bez hasła) albo RBCD. Każde z tych praw pozwala przejąć konto administratora lub DC, a więc całą domenę. Kolumna Czlonkowie pokazuje aktywne konta, które mają prawo przez grupę. Częste źródła: dawne delegacje helpdesku, Exchange, narzędzia do zarządzania kontami, konto, które utworzyło obiekt (właściciel). Jeden wiersz to jeden podmiot: kolumna Obiekty podaje liczbę obiektów Tier 0, Przyklady - pierwsze z nich (pełna lista w pliku _obiekty.csv). Kolejność wg kolumny Priorytet: 1 - szeroka grupa (np. Domain Users), 2 - prawo dające bezpośrednie przejęcie, 3 - tylko zapis SPN.'
+        Description = 'Na kontach i grupach uprzywilejowanych, kontach komputerów DC lub OU Domain Controllers są wpisy dające prawa podmiotom spoza administratorów: pełną kontrolę, zmianę uprawnień, przejęcie własności, zapis atrybutów, zmianę członkostwa grupy (także dodanie samego siebie - AddSelf), reset hasła, Shadow Credentials (dodanie własnego klucza do konta i logowanie bez hasła) albo RBCD. Każde z tych praw pozwala przejąć konto administratora lub DC, a więc całą domenę. Kolumna Czlonkowie pokazuje aktywne konta, które mają prawo przez grupę. Częste źródła: dawne delegacje helpdesku, Exchange, narzędzia do zarządzania kontami, konto, które utworzyło obiekt (właściciel). Jeden wiersz to jeden podmiot: kolumna Obiekty podaje liczbę obiektów Tier 0, Przyklady - pierwsze z nich (pełna lista w pliku _obiekty.csv). Kolejność wg kolumny Priorytet: 1 - szeroka grupa (np. Domain Users), 2 - prawo dające bezpośrednie przejęcie, 3 - tylko zapis SPN.'
         Recommendation = 'Ustalić pochodzenie każdego wpisu i usunąć zbędne. Konta i grupy uprzywilejowane powinny mieć uprawnienia wyłącznie z AdminSDHolder; obiekty DC i OU Domain Controllers - domyślne. Właścicielem obiektów Tier 0 powinni być Domain Admins. Wpisy, których nikt nie potrafi wyjaśnić, potraktować jako możliwy ślad incydentu (repadmin /showobjmeta pokaże datę zmiany).'
         Fix = (Fx 'dsacls "<DN obiektu>"   # pełna lista uprawnień obiektu',
                   'dsacls "<DN obiektu>" /R "<DOMENA>\<podmiot>"   # usuwa wpisy podmiotu - po weryfikacji',
@@ -3584,6 +3674,8 @@ Invoke-Check 'KRB-ENC' {
                           "Data[@Name='TicketEncryptionType']='0x17' or Data[@Name='TicketEncryptionType']='0x18']]"
                     $kdc = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\KDC' -ErrorAction SilentlyContinue).DefaultDomainSupportedEncTypes
                     $ev  = @(Get-WinEvent -LogName Security -FilterXPath $xp -MaxEvents 5000 -ErrorAction SilentlyContinue)
+                    # Czy dziennik w ogóle zawiera zdarzenia 4768/4769 z tego okresu: bez nich brak biletów DES/RC4 niczego nie dowodzi
+                    $any = @(Get-WinEvent -LogName Security -FilterXPath "*[System[(EventID=4768 or EventID=4769) and TimeCreated[timediff(@SystemTime) <= $ms]]]" -MaxEvents 1 -ErrorAction SilentlyContinue).Count
                     $grp = @($ev | ForEach-Object {
                         $d = @{}; foreach ($n in ([xml]$_.ToXml()).Event.EventData.Data) { $d[$n.Name] = $n.'#text' }
                         [pscustomobject]@{ Typ = $d['TicketEncryptionType']; Konto = $d['TargetUserName']; Usluga = $d['ServiceName']; Adres = $d['IpAddress'] }
@@ -3591,7 +3683,10 @@ Invoke-Check 'KRB-ENC' {
                         $f = $_.Group[0]
                         [pscustomobject]@{ Typ = $f.Typ; Konto = $f.Konto; Usluga = $f.Usluga; Adres = $f.Adres; Liczba = $_.Count }
                     })
-                    [pscustomobject]@{ Kdc = $kdc; Grupy = $grp; Razem = $ev.Count }
+                    [pscustomobject]@{ Kdc = $kdc; Grupy = $grp; Razem = $ev.Count; Audyt = [bool]$any }
+                }
+                if (-not $r.Audyt) {
+                    $krbUnk.Add([pscustomobject]@{ DC = $dc.HostName; Blad = "brak zdarzeń 4768/4769 w dzienniku Security z ostatnich $krbEventDays dni (audyt Kerberos wyłączony albo dziennik nie sięga tak daleko)" })
                 }
                 if ($null -ne $r.Kdc -and ([int64]$r.Kdc -band 3)) {
                     $kdcRows.Add([pscustomobject]@{ Obiekt = $dc.HostName; Typ = 'KDC: DefaultDomainSupportedEncTypes (rejestr DC)'; Szyfrowanie = (Format-EncTypes $r.Kdc); Kontener = '' })
@@ -3662,6 +3757,11 @@ Invoke-Check 'KRB-ENC' {
         Mitre = 'T1558'
     }
 
+    # DC bez odczytu dziennika lub bez zdarzeń 4768/4769: brak znaleziska nie oznacza, że DES/RC4 nie są używane
+    if ($UseWinRM -and -not $SkipDCChecks -and $krbUnk.Count) {
+        $krbNote = "Nierozstrzygnięty (brak danych o wydanych biletach z: $((@($krbUnk | ForEach-Object { $_.DC } | Sort-Object -Unique)) -join ', '))"
+        $ruleNote['DC-KRB-DES-USED'] = $krbNote; $ruleNote['DC-KRB-RC4-USED'] = $krbNote
+    }
     $show = { $_ | Select-Object -Property * -ExcludeProperty Kod }
     Add-IfAny @{
         Id = 'DC-KRB-DES-USED'; Category = $catKrb; Severity = 'High'
@@ -3683,7 +3783,7 @@ Invoke-Check 'KRB-ENC' {
     }
     Add-IfAny @{
         Id = 'DC-KRB-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'; Title = 'Nie odczytano użycia szyfrowania Kerberos z DC'; Objects = $krbUnk
-        Description = 'Odczyt dziennika Security lub rejestru KDC przez WinRM nie powiódł się (brak WinRM lub uprawnień).'
+        Description = 'Odczyt dziennika Security lub rejestru KDC przez WinRM nie powiódł się (brak WinRM lub uprawnień) albo dziennik nie zawiera zdarzeń 4768/4769 z badanego okresu - kolumna Blad. Dla tych DC reguły DC-KRB-DES-USED i DC-KRB-RC4-USED nie są rozstrzygnięte. Aby je ocenić, włączyć audyt Kerberos Authentication Service i Kerberos Service Ticket Operations (Sukces) i powtórzyć przegląd po kilku dniach.'
     }
 }
 #endregion
@@ -3739,20 +3839,20 @@ Invoke-Check 'DOMAIN' {
         }
     }
 
-    # dSHeuristics: 7 = operacje anonimowe LDAP, 28/29 = poprawki CVE-2021-42291 (KB5008383); '1' w 28/29 wyłącza ochronę
+    # dSHeuristics: 7 = operacje anonimowe LDAP, 28/29 = poprawki CVE-2021-42291 (KB5008383): 0 = tryb domyślny, 1 = wymuszanie, 2 = ochrona i audyt wyłączone
     $dsh = "$((Get-LdapObject -Identity "CN=Directory Service,CN=Windows NT,CN=Services,$configDn" -Properties dSHeuristics).dsheuristics)"
     $dshRows = @(
         if ((Get-DsHeuristicsChar $dsh 7) -eq '2') { [pscustomobject]@{ Znak = 7; Nazwa = 'fLDAPBlockAnonOps'; Wartosc = '2'; Skutek = 'anonimowe operacje LDAP dozwolone'; S = 'High' } }
-        if ((Get-DsHeuristicsChar $dsh 28) -eq '1') { [pscustomobject]@{ Znak = 28; Nazwa = 'AttributeAuthorizationOnLDAPAdd'; Wartosc = '1'; Skutek = 'wyłączona dodatkowa kontrola atrybutów przy tworzeniu obiektów (CVE-2021-42291)'; S = 'Medium' } }
-        if ((Get-DsHeuristicsChar $dsh 29) -eq '1') { [pscustomobject]@{ Znak = 29; Nazwa = 'BlockOwnerImplicitRights'; Wartosc = '1'; Skutek = 'wyłączona blokada niejawnych praw właściciela (CVE-2021-42291)'; S = 'Medium' } }
+        if ((Get-DsHeuristicsChar $dsh 28) -eq '2') { [pscustomobject]@{ Znak = 28; Nazwa = 'LDAPAddAuthZVerifications'; Wartosc = '2'; Skutek = 'wyłączona dodatkowa kontrola atrybutów przy tworzeniu obiektów (CVE-2021-42291)'; S = 'Medium' } }
+        if ((Get-DsHeuristicsChar $dsh 29) -eq '2') { [pscustomobject]@{ Znak = 29; Nazwa = 'LDAPOwnerModify'; Wartosc = '2'; Skutek = 'wyłączona blokada niejawnych praw właściciela (CVE-2021-42291)'; S = 'Medium' } }
     )
     if ($dshRows.Count) {
         Add-Finding @{
             Id = 'D-DSHEURISTICS'; Category = $catDom; Severity = $(if ($dshRows.S -contains 'High') { 'High' } else { 'Medium' })
             Title = "dSHeuristics osłabia zabezpieczenia lasu (wartość: $dsh)"
             Objects = ($dshRows | Select-Object Znak, Nazwa, Wartosc, Skutek)
-            Description = 'Atrybut dSHeuristics zmienia zachowanie AD w całym lesie. Siódmy znak "2" pozwala na anonimowe zapytania LDAP (wyliczanie kont bez logowania, o ile pozwalają na to uprawnienia). Znaki 28 i 29 ustawione na "1" wyłączają poprawki CVE-2021-42291, które utrudniają przejęcie domeny przez konta komputerów tworzone przez zwykłych użytkowników.'
-            Recommendation = 'Przywrócić znaki do "0" (wartość domyślna). Wcześniej ustalić, kto i po co je zmienił (np. stara aplikacja wymagająca anonimowego LDAP).'
+            Description = 'Atrybut dSHeuristics zmienia zachowanie AD w całym lesie. Siódmy znak "2" pozwala na anonimowe zapytania LDAP (wyliczanie kont bez logowania, o ile pozwalają na to uprawnienia). Znaki 28 i 29 ustawione na "2" wyłączają poprawki CVE-2021-42291 (KB5008383), które utrudniają przejęcie domeny przez konta komputerów tworzone przez zwykłych użytkowników; wartość "1" oznacza tryb wymuszania i nie jest zgłaszana.'
+            Recommendation = 'Przywrócić 7. znak do "0" (wartość domyślna), a znaki 28 i 29 ustawić na "1" (wymuszanie) lub "0". Wcześniej ustalić, kto i po co je zmienił (np. stara aplikacja wymagająca anonimowego LDAP).'
             Fix = (Fx '$ds = [ADSI]"LDAP://CN=Directory Service,CN=Windows NT,CN=Services,$(([ADSI]''LDAP://RootDSE'').configurationNamingContext)"',
                       '$ds.dSHeuristics   # bieżąca wartość; zmiana przez ADSI Edit po teście')
             Mitre = 'T1087.002'
@@ -3843,6 +3943,17 @@ Invoke-Check 'DOMAIN' {
             Mitre = 'T1110'
         }
     }
+    if ($pp.ReversibleEncryptionEnabled) {
+        Add-Finding @{
+            Id = 'D-PWDREV'; Category = $catDom; Severity = 'High'; Title = 'Polityka haseł domeny przechowuje hasła odwracalnie'
+            Description = 'Domyślna polityka haseł ma włączone "Zapisz hasła, korzystając z szyfrowania odwracalnego". Przy każdej zmianie hasła kontroler domeny zapisuje wtedy obok skrótu także postać, z której da się odtworzyć hasło jawnym tekstem. Kto uzyska kopię bazy AD (NTDS.dit, kopia zapasowa DC) albo prawo replikacji (DCSync), odczytuje hasła wszystkich takich kont bez łamania. Ustawienie obejmuje każde konto, którego nie dotyczy osobna zasada PSO.'
+            Recommendation = 'Wyłączyć szyfrowanie odwracalne w polityce haseł domeny. Hasła zapisane odwracalnie zostają w AD do następnej zmiany, dlatego potem wymusić zmianę haseł kont (najpierw uprzywilejowanych). Wcześniej ustalić, czy nie wymaga tego aplikacja (uwierzytelnianie CHAP lub Digest) - dla takich kont użyć osobnej zasady PSO albo zmienić sposób uwierzytelniania.'
+            Fix = (Fx 'Get-ADDefaultDomainPasswordPolicy -Identity {DOMENA} | Select-Object ReversibleEncryptionEnabled',
+                      'Set-ADDefaultDomainPasswordPolicy -Identity {DOMENA} -ReversibleEncryptionEnabled $false',
+                      '# po zmianie: wymusić zmianę haseł kont, np. Set-ADUser -Identity <konto> -ChangePasswordAtLogon $true')
+            Mitre = 'T1003.003'
+        }
+    }
     if ($pp.LockoutThreshold -eq 0) {
         Add-Finding @{
             Id = 'D-LOCKOUT'; Category = $catDom; Severity = 'Medium'; Title = 'Brak blokady konta po błędnych hasłach'
@@ -3851,6 +3962,11 @@ Invoke-Check 'DOMAIN' {
             Fix = (Fx 'Set-ADDefaultDomainPasswordPolicy -Identity {DOMENA} -LockoutThreshold 10 -LockoutObservationWindow 00:15:00 -LockoutDuration 00:15:00')
             Mitre = 'T1110.003'
         }
+    }
+    if ($trustsErr) {
+        $ruleNote['D-TRUST-SIDF'] = 'Nierozstrzygnięty (nie odczytano relacji zaufania)'
+        Add-Finding @{ Id = 'ERR-TRUST-READ'; Category = 'Błędy testów'; Severity = 'Info'
+                       Title = "Test filtrowania SID (D-TRUST-SIDF): nie odczytano relacji zaufania: $trustsErr" }
     }
     if ($trusts.Count) {
         Add-IfAny @{
@@ -4305,6 +4421,11 @@ public static class PepixNetApi {
         }
     }
 
+    # Sonda bez wyniku na którymkolwiek DC (zamknięty TCP 445, błąd wywołania) to brak rozstrzygnięcia, a nie zaliczenie reguły
+    foreach ($pr in @(@{ I = 'DC-SPOOLER'; L = $dcSpool; T = 'Print Spooler*' }, @{ I = 'DC-SMB1'; L = $dcSmb1; T = 'SMBv1*' }, @{ I = 'DC-NETSESSION'; L = $dcSess; T = 'NetSessionEnum*' })) {
+        $unk = @($dcUnk | Where-Object { $_.Test -like $pr.T -and $_.Metoda -notlike 'pominięte*' } | ForEach-Object { $_.DC } | Sort-Object -Unique)
+        if ($unk.Count -and -not $pr.L.Count) { $ruleNote[$pr.I] = "Nierozstrzygnięty (brak wyniku sondy na: $($unk -join ', '))" }
+    }
     Add-IfAny @{
         Id = 'DC-SPOOLER'; Category = $catDC; Severity = 'High'; Title = 'Usługa Print Spooler działa na DC'; Objects = $dcSpool
         Description = 'Przez Print Spooler każdy użytkownik domeny może zmusić DC do uwierzytelnienia się do wskazanego hosta (PrinterBug). W połączeniu z delegacją nieograniczoną lub relayem NTLM prowadzi to do przejęcia domeny; usługa miała też krytyczne podatności (PrintNightmare).'
@@ -4461,18 +4582,23 @@ if (-not $SkipDCChecks) {
             $gpoNames["$($g.name)".ToLower()] = $g.displayname
         }
         $names = 'Groups.xml', 'Services.xml', 'ScheduledTasks.xml', 'DataSources.xml', 'Drives.xml', 'Printers.xml', 'Registry.xml'
-        $files = @(Get-ChildItem -Path $pol -Recurse -File -Include $names -ErrorAction SilentlyContinue)
+        # Niedostępny SYSVOL to brak wyniku, a nie brak haseł: błąd testu zamiast zaliczenia
+        if (-not (Test-Path -LiteralPath $pol)) { throw "Katalog $pol jest niedostępny (SMB, TCP 445 lub brak dostępu do SYSVOL) - nie sprawdzono haseł w zasadach grupy." }
+        $gppErr = $null; $gppUnread = 0
+        $files = @(Get-ChildItem -Path $pol -Recurse -File -Include $names -ErrorAction SilentlyContinue -ErrorVariable gppErr)
         $rows = foreach ($fi in $files) {
             $guid = if ($fi.FullName -match '\\Policies\\(\{[0-9A-Fa-f-]+\})\\') { $Matches[1] } else { '' }
             $gpo  = if ($guid -and $gpoNames.ContainsKey($guid.ToLower())) { $gpoNames[$guid.ToLower()] } elseif ($guid) { "$guid (brak obiektu GPO w AD)" } else { $fi.DirectoryName }
             $part = if ($fi.FullName -match '\\(Machine|User)\\Preferences\\') { $Matches[1] } else { '' }
             $x = $null
-            try { $x = [xml](Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction Stop) } catch { continue }
+            try { $x = [xml](Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction Stop) } catch { $gppUnread++; continue }
             foreach ($e in @(Get-GppPasswordEntry $x $fi.Name)) {
                 [pscustomobject]@{ GPO = $gpo; Czesc = $part; Plik = $fi.Name; Element = $e.Element; Konto = $e.Konto; Typ = $e.Typ }
             }
         }
         $rows = @($rows)
+        $gppSkipped = @($gppErr).Count + $gppUnread
+        if (-not $rows.Count -and $gppSkipped) { $ruleNote['D-GPP-PASSWORD'] = "Nierozstrzygnięty (katalogi lub pliki SYSVOL nieczytelne dla konta przeglądu: $gppSkipped)" }
         Add-IfAny @{
             Id = 'D-GPP-PASSWORD'; Category = $catDom
             Severity = $(if (@($rows | Where-Object { $_.Typ -like 'cpassword*' }).Count) { 'Critical' } else { 'High' })
@@ -4719,7 +4845,10 @@ if (-not $SkipDCChecks) {
                         }
                         [pscustomobject]@{ Reg = $reg; Audit = @(auditpol.exe /get /category:* /r) }
                     }
-                    $targets.Add([pscustomobject]@{ DC = $dc.HostName; Tryb = 'WinRM'; Reg = $r.Reg; Audit = @(ConvertFrom-AuditpolCsv @($r.Audit)); Policy = $null })
+                    $ap = @(ConvertFrom-AuditpolCsv @($r.Audit))
+                    # Ustawienie w nierozpoznanym języku systemu DC: wynik auditpol odrzucany w całości (audyt oceniany z GPO) zamiast fałszywych niezgodności
+                    if (@($ap | Where-Object { $null -eq (ConvertFrom-AuditText $_.S) }).Count) { $ap = @() }
+                    $targets.Add([pscustomobject]@{ DC = $dc.HostName; Tryb = 'WinRM'; Reg = $r.Reg; Audit = $ap; Policy = $null })
                 } catch {
                     $targets.Add([pscustomobject]@{ DC = "$($dc.HostName) (GPO - WinRM niedostępny)"; Tryb = 'GPO'; Reg = $null; Audit = $null; Policy = (Get-DcGpoPolicy "$($dc.HostName)") })
                 }
@@ -4772,12 +4901,12 @@ if (-not $SkipDCChecks) {
                     $val = if ($line) { ConvertFrom-AuditText $line.S } else { $null }
                     $src = if ($line) { 'auditpol (WinRM)' } else { 'auditpol (WinRM) - brak podkategorii w wyniku' }
                 } else {
-                    # Bez -UseWinRM albo gdy auditpol na DC nie zwrócił podkategorii: konfiguracja zamierzona z GPO tego DC
+                    # Bez -UseWinRM albo gdy auditpol na DC nie zwrócił czytelnego wyniku: konfiguracja zamierzona z GPO tego DC
                     if (-not $t.Policy) { $t.Policy = Get-DcGpoPolicy "$($t.DC)"; $auditFromGpo[$t.DC] = $true }
                     $g = $t.Policy.Audit[$guid]
                     $val = if ($g) { $g.Wartosc } else { $null }
                     $src = if ($g) { $g.Zrodlo } elseif ($t.Policy.Audit.Count) { 'brak w GPO' } else { 'brak zaawansowanych zasad audytu w GPO' }
-                    if ($t.Tryb -eq 'WinRM') { $src = "$src (auditpol przez WinRM nie zwrócił podkategorii - wartość z GPO)" }
+                    if ($t.Tryb -eq 'WinRM') { $src = "$src (auditpol przez WinRM bez czytelnego wyniku - wartość z GPO)" }
                 }
                 $row = [pscustomobject]@{
                     Ustawienie = $a.N; DC = $t.DC; Obszar = 'Zasady audytu'
@@ -4848,7 +4977,7 @@ if (-not $SkipDCChecks) {
         }
         $audConf = $regConf
         if ($UseWinRM -and $auditFromGpo.Count) {
-            $audConf = @{ C = 'Średnia'; N = "auditpol przez WinRM nie zwrócił podkategorii na: $(@($auditFromGpo.Keys | Sort-Object) -join ', ') - dla nich wartości z GPO (konfiguracja zamierzona)" }
+            $audConf = @{ C = 'Średnia'; N = "auditpol przez WinRM nie zwrócił czytelnego wyniku (brak podkategorii lub nierozpoznany język systemu) na: $(@($auditFromGpo.Keys | Sort-Object) -join ', ') - dla nich wartości z GPO (konfiguracja zamierzona)" }
         }
         Add-IfAny @{
             Id = 'DC-CIS-AUDIT'; Category = $catCis; Severity = (Get-TopSeverity $audF)
@@ -5133,7 +5262,8 @@ public static class PepixNetShare {
         $auditVal = { param($It, [string]$Guid)
             if ($It.Win -and @($It.Win.Audit | Where-Object { $_ }).Count) {
                 $line = @(ConvertFrom-AuditpolCsv @($It.Win.Audit) | Where-Object { $_.G -eq $Guid })[0]
-                if ($line) { return [pscustomobject]@{ V = (ConvertFrom-AuditText $line.S); Z = 'auditpol (WinRM)' } }
+                $av = if ($line) { ConvertFrom-AuditText $line.S } else { $null }   # $null: brak podkategorii albo nierozpoznany język - wartość z GPO
+                if ($null -ne $av) { return [pscustomobject]@{ V = $av; Z = 'auditpol (WinRM)' } }
             }
             $g = $It.Policy.Audit[$Guid]
             if ($g) { return [pscustomobject]@{ V = [int]$g.Wartosc; Z = $g.Zrodlo } }
@@ -5773,6 +5903,14 @@ $ruleStatus = @(foreach ($r in $ruleCatalog) {
     }
 })
 
+# Klasa A to stwierdzenie "brak problemów w zakresie testów" - nie jest podawana, gdy część reguł skończyła się
+# błędem testu albo bez rozstrzygnięcia; wtedy klasa jest nieustalona ('?')
+$unresolvedRules = @($ruleStatus | Where-Object { $_.Status -eq 'Błąd testu' -or $_.Status -like 'Nierozstrzygnięty*' })
+if ($exposure -eq 'A' -and $unresolvedRules.Count) {
+    $exposure = '?'
+    $exposureTxt['?'] = "nieustalona - brak znalezisk, ale reguły bez wyniku (błąd testu lub brak dostępu): $($unresolvedRules.Count)"
+}
+
 # Czy status oznacza regułę ocenioną (znalezisko, zaliczona, także warunkowo, albo nie dotyczy)
 function Test-RuleEvaluated([string]$Status) {
     ($Status -in @('Znalezisko', 'Zaliczony')) -or ($Status -like 'Nie dotyczy*') -or ($Status -like 'Zaliczony warunkowo*')
@@ -6005,7 +6143,7 @@ $historyPoints = @()
 $historySkipped = 0
 $historyOlder = $false   # są starsze pliki poza limitem -MaxHistoryPoints
 if ($History) {
-    $curFile = 'AD_{0}_{1}_{2:yyyyMMdd-HHmm}.json' -f $Klient, $domain.DNSRoot, $now
+    $curFile = 'AD_{0}_{1}_{2:yyyyMMdd-HHmm}.json' -f (Get-SafeFileName $Klient), $domain.DNSRoot, $now
     $hist = [System.Collections.Generic.List[object]]::new()
     if (Test-Path -LiteralPath $OutDir) {
         # Od najnowszych (znacznik czasu na końcu nazwy); po zebraniu limitu starsze pliki nie są już otwierane
@@ -6062,17 +6200,17 @@ $invTrusts = @($trusts | ForEach-Object {
 #region ---------- wynik: pliki ----------
 Write-Step "Zapis raportu do $OutDir..."
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DNSRoot, $now)
+$base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f (Get-SafeFileName $Klient), $domain.DNSRoot, $now)
 
 # SchemaVersion: zmiana główna = niezgodna zmiana struktury (usunięcie/zmiana pola), drugorzędna = nowe pola
 [ordered]@{ SchemaVersion = $jsonSchemaVersion; Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted; Reguly = $ruleStatus
             Zgodnosc = [ordered]@{ NIS2 = $nis2Rows; ISO27001 = $isoRows }; Plan = $planRows
             Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts; Systemy = @($invOs)
                                   AktualizacjeDC = @($invPatch | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending) } } |
-    ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding $encOut
+    ConvertTo-Json -Depth 6 | Set-Content -LiteralPath "$base.json" -Encoding $encOut
 
 $sorted | Select-Object Id, Obszar, Model, Poziom, NIS2, ISO27001, MDI, Category, Severity, Pewnosc, PewnoscUwagi, Title, Count, Recommendation, Mitre |
-    Export-Csv "$base.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';'
+    ConvertTo-CsvSafe | Export-Csv -LiteralPath "$base.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';'
 
 $objRows = foreach ($f in $sorted) {
     foreach ($o in $(if (@($f.Detail).Count) { $f.Detail } else { $f.Objects })) {
@@ -6085,8 +6223,8 @@ $objRows = foreach ($f in $sorted) {
         }
     }
 }
-if ($objRows) { @($objRows) | Export-Csv "$base`_obiekty.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';' }
-if ($planRows) { $planRows | Export-Csv "$base`_plan.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';' }
+if ($objRows) { @($objRows) | ConvertTo-CsvSafe | Export-Csv -LiteralPath "$base`_obiekty.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';' }
+if ($planRows) { $planRows | ConvertTo-CsvSafe | Export-Csv -LiteralPath "$base`_plan.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';' }
 
 # --- HTML ---
 function HtmlEnc([string]$s) { [System.Net.WebUtility]::HtmlEncode($s) }
@@ -6236,7 +6374,7 @@ function Get-MitreLink([string]$Id) {
 [void]$sb.Append('<div class="cards">')
 $capNote = if ($scoreRaw -gt 100) { "; osiągnięty limit - suma punktów obszaru: $scoreRaw" } else { '' }
 [void]$sb.Append("<div class=`"card big $(Get-ScoreClass $score)`"><div class=`"v`">$score<span class=`"of`">/100</span></div><div class=`"k`">Wynik ogólny (najgorszy obszar; im mniej, tym lepiej$capNote)</div></div>")
-[void]$sb.Append("<div class=`"card big lvl$maturity`"><div class=`"v`">$exposure</div><div class=`"k`">Klasa ekspozycji (A-E): $(HtmlEnc $exposureTxt[$exposure])</div></div>")
+[void]$sb.Append("<div class=`"card big $(if ($exposure -eq '?') { 'lvl3' } else { "lvl$maturity" })`"><div class=`"v`">$exposure</div><div class=`"k`">Klasa ekspozycji (A-E): $(HtmlEnc $exposureTxt[$exposure])</div></div>")
 foreach ($s in 'Critical','High','Medium','Low') {
     [void]$sb.Append("<div class=`"card`"><div class=`"v`">$($sevCount[$s])</div><div class=`"k`">$(Badge $s)</div></div>")
 }
@@ -6472,7 +6610,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 [void]$sb.Append("<footer><img alt=`"PEPIX`" src=`"data:image/png;base64,$logoB64`">ADCheck $Version &nbsp;|&nbsp; $($now.ToString('dd.MM.yyyy')) &nbsp;|&nbsp; pepix.pl</footer></div>")
 
 # Własny szkielet HTML5 (ConvertTo-Html dodaje doctype XHTML i pustą tabelę na końcu)
-"<!DOCTYPE html>`n<html lang=`"pl`">`n<head>`n<meta charset=`"utf-8`">`n<meta name=`"viewport`" content=`"width=device-width, initial-scale=1`">`n<title>$(HtmlEnc "AD $Klient $($now.ToString('yyyy-MM-dd'))")</title>`n$css`n</head>`n<body>`n$($sb.ToString())`n</body>`n</html>" | Set-Content "$base.html" -Encoding $encOut
+"<!DOCTYPE html>`n<html lang=`"pl`">`n<head>`n<meta charset=`"utf-8`">`n<meta name=`"viewport`" content=`"width=device-width, initial-scale=1`">`n<title>$(HtmlEnc "AD $Klient $($now.ToString('yyyy-MM-dd'))")</title>`n$css`n</head>`n<body>`n$($sb.ToString())`n</body>`n</html>" | Set-Content -LiteralPath "$base.html" -Encoding $encOut
 #endregion
 
 $totalH = "$(Format-Hours (($planSum.Values | ForEach-Object { $_[0] } | Measure-Object -Sum).Sum))-$(Format-Hours (($planSum.Values | ForEach-Object { $_[1] } | Measure-Object -Sum).Sum)) h"

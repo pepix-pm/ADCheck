@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg', 'ConvertFrom-GpLink', 'Get-GpoApplyOrder', 'Get-GpoApplySids', 'Test-GpoSecurityFilter', 'Get-CheckKey', 'Resolve-CheckList', 'Compare-FindingObject', 'Get-CertBindingState', 'ConvertFrom-NtpResponse', 'Get-NtpSourceIssue', 'Get-GptLocalAdmin', 'Get-GppLocalAdmin', 'Get-AceDanger', 'Get-TemplateEnrollSid', 'Get-TemplateEscFlag', 'Get-GppPasswordEntry', 'Get-NtpSourceSeverity', 'Test-SddlAuditRead', 'Test-DataShare', 'Get-SecLogSeverity'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'ConvertFrom-AuditpolCsv', 'Format-RightHolder', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'Get-ExposureClass', 'Get-DcSyncSet', 'Get-DcSyncSource', 'Get-ReplicationRights', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec', 'Format-Count', 'ConvertTo-HistoryPoint', 'Get-DcMethodNormalized', 'Format-SvgNum', 'ConvertTo-TrendSvg', 'ConvertFrom-GpLink', 'Get-GpoApplyOrder', 'Get-GpoApplySids', 'Test-GpoSecurityFilter', 'Get-CheckKey', 'Resolve-CheckList', 'Compare-FindingObject', 'Get-CertBindingState', 'ConvertFrom-NtpResponse', 'Get-NtpSourceIssue', 'Get-GptLocalAdmin', 'Get-GppLocalAdmin', 'Get-AceDanger', 'Get-TemplateEnrollSid', 'Get-TemplateEscFlag', 'Get-GppPasswordEntry', 'Get-NtpSourceSeverity', 'Test-SddlAuditRead', 'Test-DataShare', 'Get-SecLogSeverity', 'Get-SafeFileName', 'ConvertTo-CsvSafe'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -87,6 +87,19 @@ Describe 'ConvertFrom-AuditText' {
         ConvertFrom-AuditText 'Sukces' | Should -Be 1
         ConvertFrom-AuditText 'Niepowodzenie' | Should -Be 2
         ConvertFrom-AuditText 'Brak inspekcji' | Should -Be 0
+    }
+    It 'rozpoznaje ustawienia po niemiecku i francusku' {
+        ConvertFrom-AuditText 'Erfolg und Fehler' | Should -Be 3
+        ConvertFrom-AuditText 'Erfolg' | Should -Be 1
+        ConvertFrom-AuditText 'Fehler' | Should -Be 2
+        ConvertFrom-AuditText 'Keine Überwachung' | Should -Be 0
+        ConvertFrom-AuditText 'Succès et échec' | Should -Be 3
+        ConvertFrom-AuditText 'Échec' | Should -Be 2
+        ConvertFrom-AuditText "Pas d'audit" | Should -Be 0
+    }
+    It 'tekst w nierozpoznanym języku to brak wiedzy, nie brak audytu' {
+        ConvertFrom-AuditText 'Onnistuminen ja virhe' | Should -BeNullOrEmpty
+        ConvertFrom-AuditText '' | Should -BeNullOrEmpty
     }
 }
 
@@ -248,6 +261,26 @@ Describe 'Test-IpInSubnet' {
         @{ Ip = '10.0.0.1';     Cidr = 'fe80::/64';      Wynik = $false }
     ) {
         Test-IpInSubnet $Ip $Cidr | Should -Be $Wynik
+    }
+}
+
+Describe 'Nazwa pliku wynikowego i ochrona CSV przed formułami' {
+    It 'znaki niedozwolone w nazwie pliku i wzorce PowerShella' {
+        Get-SafeFileName 'KLIENT' | Should -Be 'KLIENT'
+        Get-SafeFileName 'Firma [test] A/B' | Should -Be 'Firma _test_ A_B'
+        Get-SafeFileName 'a\b:c*d?e"f<g>h|i' | Should -Be 'a_b_c_d_e_f_g_h_i'
+        Get-SafeFileName ' . ' | Should -Be 'klient'
+    }
+    It 'tekst zaczynający się od = + - @ dostaje apostrof' {
+        $r = [pscustomobject]@{ A = '=cmd|x'; B = '+1'; C = '-2'; D = '@SUM(1)'; E = 'zwykły=tekst'; F = -5; G = $null } | ConvertTo-CsvSafe
+        $r.A | Should -Be "'=cmd|x"
+        $r.B | Should -Be "'+1"
+        $r.C | Should -Be "'-2"
+        $r.D | Should -Be "'@SUM(1)"
+        $r.E | Should -Be 'zwykły=tekst'
+        $r.F | Should -Be -5
+        $r.G | Should -BeNullOrEmpty
+        @($r.PSObject.Properties.Name) | Should -Be @('A', 'B', 'C', 'D', 'E', 'F', 'G')
     }
 }
 
@@ -632,6 +665,13 @@ Describe 'Regresja: niebezpieczne prawa w ACL (Get-AceDanger)' {
         @(Get-AceDanger (New-Ace $R::ExtendedRight $aclGuid.ForceChangePwd)).Count | Should -Be 1
         (@(Get-AceDanger (New-Ace $R::ExtendedRight $aclGuid.GetChangesAll)) -join ';') | Should -Match 'DCSync'
         (@(Get-AceDanger (New-Ace $R::ExtendedRight $null)) -join ';') | Should -Match 'DCSync'
+    }
+    It 'zapis zweryfikowany: dodanie siebie do grupy (AddSelf)' {
+        (@(Get-AceDanger (New-Ace $R::Self $aclGuid.Member)) -join ';') | Should -Match 'AddSelf'
+        (@(Get-AceDanger (New-Ace $R::Self $null)) -join ';') | Should -Match 'AddSelf'
+        # sam zapis zweryfikowany SPN to niższy priorytet w P-ACL-TIER0 - opis AddSelf nie może zawierać "SPN"
+        (@(Get-AceDanger (New-Ace $R::Self $null)) -join ';') | Should -Not -Match 'SPN'
+        @(Get-AceDanger (New-Ace $R::Self 'bf967950-0de6-11d0-a285-00aa003049e2')).Count | Should -Be 0
     }
     It 'prawa nieszkodliwe nie są zgłaszane' {
         @(Get-AceDanger (New-Ace $R::GenericRead $null)).Count | Should -Be 0

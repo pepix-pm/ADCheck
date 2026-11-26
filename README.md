@@ -29,7 +29,7 @@ Tworzy i rozwija [PEPIX](https://pepix.pl) – przeglądy bezpieczeństwa Active
 
 - Windows 10/11 lub Windows Server z PowerShellem (Windows PowerShell 5.1 lub PowerShell 7)
 - **Bez RSAT i bez instalowania czegokolwiek** – AD jest odczytywane przez LDAP (`System.DirectoryServices`, wbudowane w Windows)
-- Stacja w domenie (lub `-Server`) z dostępem do kontrolerów domeny: LDAP (TCP 389), SMB/SYSVOL (TCP 445), DNS domeny
+- Stacja w domenie (lub `-Server`) z dostępem do kontrolerów domeny: LDAP (TCP 389), SMB/SYSVOL (TCP 445), DNS domeny. Test DC-PORTS i testy kondycji sprawdzają też na każdym DC porty 53, 88 (Kerberos), 135 (RPC), 9389 (ADWS), 3268 (wykaz globalny) i czas przez NTP (UDP 123), a testy AD CS – port 135 (RPC) i 80 (HTTP) serwera CA; port zamknięty między stacją a serwerem daje znalezisko DC-PORTS albo status „Nierozstrzygnięty”, nie przerywa przeglądu
 - Konto użytkownika domeny bez uprawnień administracyjnych (wystarczy członkostwo w Domain Users). Tryb `-UseWinRM` wymaga konta z grupy Administrators domeny (np. członka Domain Admins) i dostępu WinRM (TCP 5985) do każdego DC, a dla testów serwerów (C-SRV-*) – administratora lokalnego i WinRM na serwerach członkowskich
 - Testy serwerów (C-SRV-*) wyliczają udziały aktywnych serwerów przez SMB (TCP 445) – na zwykłym koncie; serwer nieosiągalny trafia do INFO-SRV-AUDIT, a przegląd trwa dalej
 
@@ -131,7 +131,7 @@ W katalogu `raporty` powstają pliki `AD_<klient>_<domena>_<data>`:
 
 - Każde znalezisko: Critical = 25, High = 10, Medium = 3, Low = 1 pkt.
 - Znaleziska należą do jednego z **czterech obszarów ryzyka**: obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie. Wynik obszaru = suma punktów, maks. 100. **Wynik ogólny = najgorszy obszar** (0–100, im mniej, tym lepiej). Gdy suma przekracza 100, raport podaje też pełną sumę (np. 4 i 10 znalezisk Critical dają ten sam wynik 100, ale inną sumę); porównanie z `-Previous` pokazuje wtedy zmianę sumy. Karta zmiany podaje też zmianę klasy ekspozycji i liczbę nowych znalezisk Critical (wynik może spaść mimo nowego Critical, jeśli najgorszy jest inny obszar), a sekcja porównania ostrzega, gdy poprzedni przegląd wykonano w innym trybie (testy DC, konto przeglądu, uprawnienia konta).
-- **Klasa ekspozycji A–E** wynika z najpoważniejszego znaleziska (Critical = E, High = D, Medium = C, Low = B, brak = A). Opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa organizacji.
+- **Klasa ekspozycji A–E** wynika z najpoważniejszego znaleziska (Critical = E, High = D, Medium = C, Low = B, brak = A). Klasa A wymaga, żeby żadna reguła nie skończyła się błędem testu ani statusem „Nierozstrzygnięty” – w przeciwnym razie przy braku znalezisk klasa jest nieustalona („?”). Opisuje stan techniczny AD w zakresie testów, a nie dojrzałość procesów bezpieczeństwa organizacji.
 - **Pewność wyniku** (Wysoka / Średnia / Niska) – znalezisko oparte na źródle pośrednim ma w karcie dopisek z uzasadnieniem: np. ustawienia DC odczytane z GPO zamiast z rejestru (Średnia) albo z GPO o niepewnym zakresie lub niepełnym odczycie (Niska). Pole `Pewnosc` jest też w JSON i CSV. Karta każdego obszaru podaje, ile jego reguł faktycznie oceniono (`Meta.PokrycieObszarow`) – przy niepełnym pokryciu wynik obszaru może być zaniżony.
 - **Macierz ryzyka** pokazuje punkty w podziale obszar × rodzaj ryzyka (np. „Łamanie haseł”, „Pass-the-hash”, „Replikacja i kondycja”).
 - **Historia przeglądów** (`-History`) – wykres wyniku ogólnego i obszarów oraz zgodności DC z CIS L1 i Microsoft Security Baseline w kolejnych przeglądach, z tabelą (data, wersja, tryb, wynik, klasa, liczba znalezisk wg wagi). Źródłem są pliki JSON z katalogu wyników, wyłącznie z tą samą nazwą klienta i domeną; pliki z niezgodną główną wersją `SchemaVersion` są pomijane. Przeglądy w innym trybie niż bieżący (inne źródło testów DC lub inne konto) mają pusty znacznik – zmiana może wynikać z trybu, a nie ze zmian w AD. Wykres jest wpisany w raport (SVG), bez zewnętrznych bibliotek.
@@ -188,6 +188,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | P-SPN | High | Konta uprzywilejowane z SPN | T1558.003 |
 | P-DA-COUNT | Medium | Więcej niż 5 członków Domain Admins | T1078.002 |
 | P-SchemaAdmins, P-AccountOperators, P-ServerOperators, P-PrintOperators, P-BackupOperators | Medium | Niepuste grupy wysokiego ryzyka | T1078.002 |
+| P-PRIV-MEMBERS | Critical / High / Medium | Członkowie grup uprzywilejowanych inni niż konta osób: szerokie grupy, np. Domain Users lub Authenticated Users (Critical), konta komputerów i gMSA (High), podmioty spoza domeny (Medium) | T1098.007 |
 | P-DnsAdmins | Medium | Niepusta grupa DnsAdmins (wykonanie kodu na DC przez usługę DNS); członkowie traktowani jak konta uprzywilejowane | T1078.002 |
 | P-KeyAdmins, P-EnterpriseKeyAdmins | Medium | Niepuste grupy Key Admins / Enterprise Key Admins (zapis msDS-KeyCredentialLink na kontach, Shadow Credentials); członkowie traktowani jak konta uprzywilejowane, a domyślne prawa tych grup nie są zgłaszane w ACL | T1078.002 |
 | P-GPCO | Low | Konta spoza administratorów w Group Policy Creator Owners | T1484.001 |
@@ -236,6 +237,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-RECYCLE | Medium | Kosz AD wyłączony | – |
 | D-PWDLEN | Medium | Minimalna długość hasła < 12 | T1110 |
 | D-PWDCPLX | Medium | Złożoność haseł wyłączona | T1110 |
+| D-PWDREV | High | Polityka haseł domeny przechowuje hasła odwracalnie (`pwdProperties`, bit 0x10) | T1003.003 |
 | D-LOCKOUT | Medium | Brak blokady konta | T1110.003 |
 | D-FGPP-WEAK | High / Medium | Szczegółowe zasady haseł (PSO) słabsze od polityki domeny; High, gdy obejmują konta uprzywilejowane. Zwykłe konto zwykle nie widzi PSO – reguła ma wtedy status „Pominięty” | T1110 |
 | D-TRUST-SIDF | Medium | Zaufania zewnętrzne bez filtrowania SID | T1134.005 |
@@ -244,7 +246,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-DFL | Low | Poziom funkcjonalny domeny < 2016 | – |
 | D-FFL | Low | Poziom funkcjonalny lasu < 2016 | – |
 | D-PREWIN2000 | High / Low | Everyone, Anonymous Logon (High) lub Authenticated Users (Low) w Pre-Windows 2000 Compatible Access | T1087.002 |
-| D-DSHEURISTICS | High / Medium | dSHeuristics: anonimowe operacje LDAP (7. znak) lub wyłączone poprawki CVE-2021-42291 (28./29. znak) | T1087.002 |
+| D-DSHEURISTICS | High / Medium | dSHeuristics: anonimowe operacje LDAP (7. znak = 2) lub wyłączone poprawki CVE-2021-42291 (28./29. znak = 2, KB5008383) | T1087.002 |
 | D-DNS-CREATECHILD | Low | Strefy DNS z CreateChild dla Authenticated Users bez rekordu wildcard (ADIDNS spoofing) | T1557 |
 | D-GPO-LLMNR | Medium | Żadne podlinkowane GPO nie wyłącza LLMNR (ustawienie tylko w GPO na OU/lokacji: „Zaliczony warunkowo”) | T1557.001 |
 | D-GPO-HARDPATH | Medium / Low | GPO osłabia Hardened UNC Paths dla SYSVOL/NETLOGON lub ich brak przy starszych systemach | T1557 |
